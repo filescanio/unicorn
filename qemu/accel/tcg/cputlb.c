@@ -1437,6 +1437,7 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
     HOOK_FOREACH_VAR_DECLARE;
     struct uc_struct *uc = env->uc;
     MemoryRegion *mr = memory_mapping(uc, addr);
+    bool is_user = mmu_idx == MMU_USER_IDX;
 
     // memory might be still unmapped while reading or fetching
     if (mr == NULL) {
@@ -1518,7 +1519,7 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
         }
 
         // callback on non-readable memory
-        if (mr != NULL && !(mr->perms & UC_PROT_READ)) {  //non-readable
+        if (mr != NULL && !(mr->perms & UC_PROT_READ) && false != is_user) {  //non-readable
             handled = false;
             HOOK_FOREACH(uc, hook, UC_HOOK_MEM_READ_PROT) {
                 if (hook->to_delete)
@@ -1993,6 +1994,7 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
     struct hook *hook;
     bool handled;
     MemoryRegion *mr;
+    bool is_user = mmu_idx == MMU_USER_IDX;
 
     if (!uc->size_recur_mem) { // disabling write callback if in recursive call
         // Unicorn: callback on memory write
@@ -2047,7 +2049,7 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
     }
 
     // Unicorn: callback on non-writable memory
-    if (mr != NULL && !(mr->perms & UC_PROT_WRITE)) {  //non-writable
+    if (mr != NULL && !(mr->perms & UC_PROT_WRITE) && false != is_user) {  //non-writable
         // printf("not writable memory???\n");
         handled = false;
         HOOK_FOREACH(uc, hook, UC_HOOK_MEM_WRITE_PROT) {

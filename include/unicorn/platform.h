@@ -209,6 +209,15 @@ typedef _W64 unsigned int uintptr_t;
 #include <sys/timeb.h>
 #include <windows.h>
 
+/*static int gettimeofday(struct timeval* t, void* timezone)
+{
+    UNREFERENCED_PARAMETER( timezone );
+    struct _timeb timebuffer;
+    _ftime_s( &timebuffer );
+    t->tv_sec = (long)timebuffer.time;
+    t->tv_usec = 1000*timebuffer.millitm;
+    return 0;
+}*/
 #else
 #include <sys/time.h>
 #endif
