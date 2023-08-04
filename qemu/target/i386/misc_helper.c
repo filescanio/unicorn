@@ -104,39 +104,35 @@ void helper_into(CPUX86State *env, int next_eip_addend)
 
 void helper_cpuid(CPUX86State *env)
 {
-    uint32_t eax, ebx, ecx, edx;
     struct hook *hook;
-    int skip_cpuid = 0;
+    uc_x86_cpuid_q cpuid_q;
 
     cpu_svm_check_intercept_param(env, SVM_EXIT_CPUID, 0, GETPC());
 
-    // Unicorn: call registered CPUID hooks
+    cpuid_q.in_eax = (uint32_t)env->regs[R_EAX];
+    cpuid_q.in_ecx = (uint32_t)env->regs[R_ECX];
+
+    cpu_x86_cpuid(env, cpuid_q.in_eax, cpuid_q.in_ecx,
+                  &cpuid_q.out_eax, &cpuid_q.out_ebx, &cpuid_q.out_ecx, &cpuid_q.out_edx);
+
     HOOK_FOREACH_VAR_DECLARE;
     HOOK_FOREACH(env->uc, hook, UC_HOOK_INSN) {
         if (hook->to_delete)
             continue;
         if (!HOOK_BOUND_CHECK(hook, env->eip))
             continue;
-        
-        // Multiple cpuid callbacks returning different values is undefined.
-        // true -> skip the cpuid instruction
         if (hook->insn == UC_X86_INS_CPUID)
-            skip_cpuid = ((uc_cb_insn_cpuid_t)hook->callback)(env->uc, hook->user_data);
+            ((uc_cb_insn_cpuid_t)hook->callback)(env->uc, &cpuid_q, hook->user_data);
 
         // the last callback may already asked to stop emulation
         if (env->uc->stop_request)
             break;
     }
 
-    if (!skip_cpuid) {
-        cpu_x86_cpuid(env, (uint32_t)env->regs[R_EAX], (uint32_t)env->regs[R_ECX],
-                    &eax, &ebx, &ecx, &edx);
-        env->regs[R_EAX] = eax;
-        env->regs[R_EBX] = ebx;
-        env->regs[R_ECX] = ecx;
-        env->regs[R_EDX] = edx;
-    }
-    
+    env->regs[R_EAX] = cpuid_q.out_eax;
+    env->regs[R_EBX] = cpuid_q.out_ebx;
+    env->regs[R_ECX] = cpuid_q.out_ecx;
+    env->regs[R_EDX] = cpuid_q.out_edx;
 }
 
 target_ulong helper_read_crN(CPUX86State *env, int reg)
@@ -205,7 +201,9 @@ void helper_invlpg(CPUX86State *env, target_ulong addr)
 
 void helper_rdtsc(CPUX86State *env)
 {
+    struct hook *hook;
     uint64_t val;
+    uc_x86_rdtsc_q rdtsc_q;
 
     if ((env->cr[4] & CR4_TSD_MASK) && ((env->hflags & HF_CPL_MASK) != 0)) {
         raise_exception_ra(env, EXCP0D_GPF, GETPC());
@@ -213,8 +211,22 @@ void helper_rdtsc(CPUX86State *env)
     cpu_svm_check_intercept_param(env, SVM_EXIT_RDTSC, 0, GETPC());
 
     val = cpu_get_tsc(env) + env->tsc_offset;
-    env->regs[R_EAX] = (uint32_t)(val);
-    env->regs[R_EDX] = (uint32_t)(val >> 32);
+
+    rdtsc_q.eax = (uint32_t)(val);
+    rdtsc_q.edx = (uint32_t)(val >> 32);
+
+    HOOK_FOREACH_VAR_DECLARE;
+    HOOK_FOREACH(env->uc, hook, UC_HOOK_INSN) {
+        if (hook->to_delete)
+            continue;
+        if (!HOOK_BOUND_CHECK(hook, env->eip))
+            continue;
+        if (hook->insn == UC_X86_INS_RDTSC)
+            ((uc_cb_insn_rdtsc_t)hook->callback)(env->uc, &rdtsc_q, hook->user_data);
+    }
+
+    env->regs[R_EAX] = rdtsc_q.eax;
+    env->regs[R_EDX] = rdtsc_q.edx;
 }
 
 void helper_rdtscp(CPUX86State *env)
