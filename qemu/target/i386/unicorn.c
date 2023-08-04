@@ -2003,7 +2003,7 @@ static bool x86_insn_hook_validate(uint32_t insn_enum)
     // for x86 we can only hook IN, OUT, and SYSCALL
     if (insn_enum != UC_X86_INS_IN && insn_enum != UC_X86_INS_OUT &&
         insn_enum != UC_X86_INS_SYSCALL && insn_enum != UC_X86_INS_SYSENTER &&
-        insn_enum != UC_X86_INS_CPUID) {
+        insn_enum != UC_X86_INS_CPUID && insn_enum != UC_X86_INS_RDTSC) {
         return false;
     }
     return true;
