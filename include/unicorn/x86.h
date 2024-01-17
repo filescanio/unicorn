@@ -33,6 +33,26 @@ typedef struct uc_x86_msr {
 // @user_data: user data passed to tracing APIs.
 typedef void (*uc_cb_insn_syscall_t)(struct uc_struct *uc, void *user_data);
 
+typedef struct uc_x86_cpuid_q
+{
+   uint32_t in_eax;
+   uint32_t in_ecx;
+   uint32_t out_eax;
+   uint32_t out_ebx;
+   uint32_t out_ecx;
+   uint32_t out_edx;
+} uc_x86_cpuid_q;
+
+typedef void (*uc_cb_insn_cpuid_t)(struct uc_struct *uc, struct uc_x86_cpuid_q* cpuid_query, void *user_data);
+
+typedef struct uc_x86_rdtsc_q
+{
+   uint32_t eax;
+   uint32_t edx;
+} uc_x86_rdtsc_q;
+
+typedef void (*uc_cb_insn_rdtsc_t)(struct uc_struct *uc, struct uc_x86_rdtsc_q* rdtsc_query, void *user_data);
+
 //> X86 registers
 typedef enum uc_x86_reg {
 	UC_X86_REG_INVALID = 0,
