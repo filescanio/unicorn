@@ -222,7 +222,7 @@ void helper_rdtsc(CPUX86State *env)
         if (!HOOK_BOUND_CHECK(hook, env->eip))
             continue;
         if (hook->insn == UC_X86_INS_RDTSC)
-            ((uc_cb_insn_syscall_t)hook->callback)(env->uc, &rdtsc_q, hook->user_data);
+            ((uc_cb_insn_rdtsc_t)hook->callback)(env->uc, &rdtsc_q, hook->user_data);
     }
 
     env->regs[R_EAX] = rdtsc_q.eax;
