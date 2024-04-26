@@ -367,7 +367,7 @@ uc_err uc_close(uc_engine *uc)
     // finally, free uc itself.
     memset(uc, 0, sizeof(*uc));
     free(uc);
-    
+
     return UC_ERR_OK;
 }
 
@@ -549,7 +549,7 @@ static void clear_deleted_hooks(uc_engine *uc)
     struct list_item * cur;
     struct hook * hook;
     int i;
-    
+
     for (cur = uc->hooks_to_del.head; cur != NULL && (hook = (struct hook *)cur->data); cur = cur->next) {
         assert(hook->to_delete);
         for (i = 0; i < UC_HOOK_MAX; i++) {
@@ -866,7 +866,9 @@ static bool split_region(struct uc_struct *uc, MemoryRegion *mr, uint64_t addres
         return false;
 
     QTAILQ_FOREACH(block, &uc->ram_list.blocks, next) {
-        if (block->offset <= mr->addr && block->length >= (mr->end - mr->addr)) {
+        //if (block->offset <= mr->addr && block->length >= (mr->end - mr->addr)) {
+        /* backported fix according to commits c733bba and 9651863 */
+        if (block->mr->addr <= mr->addr && block->length + block->mr->addr >= mr->end) {
             break;
         }
     }
