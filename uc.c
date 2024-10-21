@@ -1190,6 +1190,101 @@ static bool memory_overlap(struct uc_struct *uc, uint64_t begin, size_t size)
     return false;
 }
 
+UNICORN_EXPORT
+uint64_t uc_mem_find_gap(uc_engine *uc, uint64_t address, size_t size)
+{
+    MemoryRegion * mr;
+    int i = bsearch_mapped_blocks(uc, address);
+    uint64_t prev_end;
+
+    // is this the highest region already?
+    if(i >= uc->mapped_block_count)
+        return address;
+
+    mr = uc->mapped_blocks[i];
+
+    // end address overlaps this region?
+    if(address + size <= mr->addr)
+        return address; /* no overlap, good gap */
+
+    /* find gap with lowest address */
+    i++;
+    for(; i < uc->mapped_block_count; i++) {
+        prev_end = mr->end;
+
+        mr = uc->mapped_blocks[i];
+        if(mr->addr - prev_end >= size) {
+            break;
+        }
+
+    }
+
+    return prev_end;
+}
+
+UNICORN_EXPORT
+uint8_t *uc_mem_stat(uc_engine *uc, uint64_t address, size_t *size_ptr,
+                     uint32_t *perms)
+{
+
+    int i = bsearch_mapped_blocks(uc, address);
+    MemoryRegion *mr = uc->mapped_blocks[i];
+    mr = (i >= uc->mapped_block_count || mr->addr > address) ? NULL : mr;
+    size_t size, size_max = 0;
+    uint8_t *host_ptr = NULL, *r = NULL;
+    uint32_t perms_req = 0, perms_aggr;
+
+    if(!mr || !mr->ram_block) {
+        return NULL;
+    }
+    r = host_ptr = address - mr->addr + mr->ram_block->host;
+    if(size_ptr) {
+        size_max = *size_ptr ? *size_ptr : (size_t)-1;
+    }
+    if(perms) {
+        perms_req = *perms;
+    }
+    for(size = 0, perms_aggr = UC_PROT_ALL;
+        i < uc->mapped_block_count && size < size_max && mr->ram_block;
+        mr = uc->mapped_blocks[++i]) {
+
+        if(!((~perms_req & UC_PROT_ALL) | (perms_req & mr->perms))) {
+            break;
+        }
+
+        if(!size ||
+           (size && mr->addr == address && mr->ram_block->host == host_ptr)) {
+
+            size_t remaining = MIN(size_max - size, mr->end - address);
+
+            size += remaining;
+            address += remaining;
+            host_ptr += remaining;
+        }
+        else {
+            break;
+        }
+        perms_aggr &= mr->perms;
+    }
+
+    if(size_ptr) {
+        *size_ptr = size;
+    }
+    if(perms) {
+        *perms = perms_aggr;
+    }
+
+    return r;
+}
+
+UNICORN_EXPORT
+uint8_t *uc_mem_get_host_ptr(uc_engine *uc, uint64_t address, size_t size)
+{
+    size_t avail = size;
+    uint8_t *r = uc_mem_stat(uc, address, &avail, NULL);
+    return avail >= size ? r : NULL;
+}
+
 // common setup/error checking shared between uc_mem_map and uc_mem_map_ptr
 static uc_err mem_map(uc_engine *uc, MemoryRegion *block)
 {
