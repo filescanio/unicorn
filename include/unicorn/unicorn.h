@@ -1071,6 +1071,52 @@ uc_err uc_mem_map_ptr(uc_engine *uc, uint64_t address, size_t size,
                       uint32_t perms, void *ptr);
 
 /*
+ Get information of mapped guest memory blocks.
+
+ @uc: handle returned by uc_open()
+ @address: starting address of a memory block to retrieve info on.
+
+ @size_ptr [in/out]: size of region to check.
+   If NULL, only starting address is checked (whether it is mapped).
+   If !NULL, the size of matching memory block is returned
+   ( == mapped and matches perms).
+   If *size_ptr != 0, it specifies the size of memory to check.
+
+ @perms [in/out]: specify permission mask needed (NULL->any, *perms == 0->any)
+    if !NULL, the aggregated permission bits are returned
+    (i.e. perms of all of the affected memory regions ANDed)
+
+ @return host address for address (NULL if !mapped)
+*/
+UNICORN_EXPORT
+uint8_t *uc_mem_stat(uc_engine *uc, uint64_t address, size_t *size_ptr,
+                     uint32_t *perms);
+
+/*
+ Get host pointer for guest address. Works with user mapped areas.
+
+ @uc: handle returned by uc_open()
+ @address: starting address of a memory block
+ @size: size of memory block to check if mapped
+
+ @return host address (NULL if region specified by address/size is not mapped)
+*/
+UNICORN_EXPORT
+uint8_t *uc_mem_get_host_ptr(uc_engine *uc, uint64_t address, size_t size);
+
+/*
+ Get lowest guest address where memory block fits.
+
+ @uc: handle returned by uc_open()
+ @address: starting address for the search
+ @size: size of memory block
+
+ @return lowest guest address where the memory block can be mapped.
+*/
+UNICORN_EXPORT
+uint64_t uc_mem_find_gap(uc_engine *uc, uint64_t address, size_t size);
+
+/*
  Map MMIO in for emulation.
  This API adds a MMIO region that can be used by emulation.
 
