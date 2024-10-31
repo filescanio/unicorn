@@ -323,6 +323,7 @@ struct MemoryRegion {
     struct uc_struct *uc;
     uint32_t perms;
     hwaddr end;
+    bool dirty;
 };
 
 struct IOMMUMemoryRegion {
@@ -820,7 +821,7 @@ MemTxResult memory_region_dispatch_write(struct uc_struct *uc, MemoryRegion *mr,
  * @as: an uninitialized #AddressSpace
  * @root: a #MemoryRegion that routes addresses for the address space
  */
-void address_space_init(struct uc_struct *uc, 
+void address_space_init(struct uc_struct *uc,
                         AddressSpace *as,
                         MemoryRegion *root);
 
