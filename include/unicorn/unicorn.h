@@ -1133,6 +1133,18 @@ UNICORN_EXPORT
 uint64_t uc_mem_find_gap(uc_engine *uc, uint64_t address, size_t size);
 
 /*
+ Get and clear dirty flag of memory region(s) specified by address/size.
+
+ @uc: handle returned by uc_open()
+ @address: starting address of memory range
+ @size: size of memory block
+
+ @return true if memory region has been written to since the preious call.
+*/
+UNICORN_EXPORT
+bool uc_mem_get_dirty(uc_engine *uc, uint64_t address, size_t size);
+
+/*
  Map MMIO in for emulation.
  This API adds a MMIO region that can be used by emulation.
 
