@@ -1615,7 +1615,7 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
         // if there is already an unhandled eror, skip callbacks.
         if (uc->invalid_error == UC_ERR_OK) {
             if (code_read) {
-                // code fetching  
+                // code fetching
                 error_code = UC_ERR_FETCH_UNMAPPED;
                 HOOK_FOREACH(uc, hook, UC_HOOK_MEM_FETCH_UNMAPPED) {
                     if (hook->to_delete)
@@ -2344,6 +2344,11 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
             cpu_exit(uc->cpu);
             return;
         }
+    }
+
+    /* this is to replace mem write hooks that are used only to detect overwrites */
+    if(mr->ram) {
+        mr->dirty = true;
     }
 
     if (uc->snapshot_level && mr->ram && mr->priority < uc->snapshot_level) {

@@ -1364,6 +1364,30 @@ uint64_t uc_mem_find_gap(uc_engine *uc, uint64_t address, size_t size)
 }
 
 UNICORN_EXPORT
+bool uc_mem_get_dirty(uc_engine *uc, uint64_t address, size_t size)
+{
+    int i = bsearch_mapped_blocks(uc, address);
+    bool dirty = false;
+
+    for(; i < uc->mapped_block_count && size; i++) {
+        MemoryRegion *mr = uc->mapped_blocks[i];
+
+        if(mr->addr > address) {
+            break;
+        }
+        if(mr->dirty) {
+            dirty = true;
+            mr->dirty = false;
+        }
+        size_t remaining = MIN(size, mr->end - address);
+        size -= remaining;
+        address += remaining;
+    }
+
+    return dirty;
+}
+
+UNICORN_EXPORT
 uint8_t *uc_mem_stat(uc_engine *uc, uint64_t address, size_t *size_ptr,
                      uint32_t *perms)
 {
@@ -1436,6 +1460,7 @@ static uc_err mem_map(uc_engine *uc, MemoryRegion *block)
     if (block == NULL) {
         return UC_ERR_NOMEM;
     }
+    block->dirty = false;
 
     if ((uc->mapped_block_count & (MEM_BLOCK_INCR - 1)) == 0) { // time to grow
         regions = (MemoryRegion **)g_realloc(
