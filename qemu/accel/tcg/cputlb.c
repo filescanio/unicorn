@@ -1208,7 +1208,7 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
     // - have memory hooks installed
     // - or doing snapshot
     // , then never clean the tlb
-    if (!(cpu->uc->snapshot_level > 0 || mr->priority > 0) && 
+    if (!(cpu->uc->snapshot_level > 0 || mr->priority > 0) &&
             !(HOOK_EXISTS(cpu->uc, UC_HOOK_MEM_READ) || HOOK_EXISTS(cpu->uc, UC_HOOK_MEM_WRITE))) {
         tlb_set_dirty(cpu, mem_vaddr);
     }
@@ -1536,7 +1536,7 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
                         continue;
                     if (!HOOK_BOUND_CHECK(hook, paddr))
                         continue;
-                    JIT_CALLBACK_GUARD_VAR(handled, 
+                    JIT_CALLBACK_GUARD_VAR(handled,
                                            ((uc_cb_eventmem_t)hook->callback)(uc, UC_MEM_READ_UNMAPPED, paddr, size, 0, hook->user_data));
                     if (handled)
                         break;
@@ -1627,7 +1627,7 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
                     continue;
                 if (!HOOK_BOUND_CHECK(hook, paddr))
                     continue;
-                JIT_CALLBACK_GUARD_VAR(handled, 
+                JIT_CALLBACK_GUARD_VAR(handled,
                                        ((uc_cb_eventmem_t)hook->callback)(uc, UC_MEM_READ_PROT, paddr, size, 0, hook->user_data));
                 if (handled)
                     break;
@@ -2220,6 +2220,11 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
             cpu_exit(uc->cpu);
             return;
         }
+    }
+
+    /* this is to replace mem write hooks that are used only to detect overwrites */
+    if(mr->ram) {
+        mr->dirty = true;
     }
 
     if (uc->snapshot_level && mr->ram && mr->priority < uc->snapshot_level) {
