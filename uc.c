@@ -1267,7 +1267,7 @@ uint8_t *uc_mem_stat(uc_engine *uc, uint64_t address, size_t *size_ptr,
         i < uc->mapped_block_count && size < size_max && mr->ram_block;
         mr = uc->mapped_blocks[++i]) {
 
-        if(!((~perms_req & UC_PROT_ALL) | (perms_req & mr->perms))) {
+        if(perms_req != (perms_req & ~(perms_req ^ mr->perms))) {
             break;
         }
 
