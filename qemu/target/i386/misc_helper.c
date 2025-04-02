@@ -105,12 +105,19 @@ void helper_into(CPUX86State *env, int next_eip_addend)
 
 void helper_cpuid(CPUX86State *env)
 {
-    uint32_t eax, ebx, ecx, edx;
+    uint32_t eax, ebx, ecx, edx, eax_in, ecx_in;
     uc_engine *uc = env->uc;
     struct hook *hook;
-    int skip_cpuid = 0;
     bool synced = false;
     cpu_svm_check_intercept_param(env, SVM_EXIT_CPUID, 0, GETPC());
+
+    eax_in = (uint32_t)env->regs[R_EAX];
+    ecx_in = (uint32_t)env->regs[R_ECX];
+    cpu_x86_cpuid(env, eax_in, ecx_in, &eax, &ebx, &ecx, &edx);
+    env->regs[R_EAX] = eax;
+    env->regs[R_EBX] = ebx;
+    env->regs[R_ECX] = ecx;
+    env->regs[R_EDX] = edx;
 
     // Unicorn: call registered CPUID hooks
     HOOK_FOREACH_VAR_DECLARE;
@@ -119,7 +126,7 @@ void helper_cpuid(CPUX86State *env)
             continue;
         if (!HOOK_BOUND_CHECK(hook, env->eip))
             continue;
-        
+
         // Multiple cpuid callbacks returning different values is undefined.
         // true -> skip the cpuid instruction
         if (hook->insn == UC_X86_INS_CPUID) {
@@ -128,23 +135,13 @@ void helper_cpuid(CPUX86State *env)
                 cpu_restore_state(uc->cpu, pc, false);
                 synced = true;
             }
-            JIT_CALLBACK_GUARD_VAR(skip_cpuid, ((uc_cb_insn_cpuid_t)hook->callback)(env->uc, hook->user_data));
+            JIT_CALLBACK_GUARD(((uc_cb_insn_cpuid_t)hook->callback)(env->uc, eax_in, ecx_in, hook->user_data));
         }
 
         // the last callback may already asked to stop emulation
         if (env->uc->stop_request)
             break;
     }
-
-    if (!skip_cpuid) {
-        cpu_x86_cpuid(env, (uint32_t)env->regs[R_EAX], (uint32_t)env->regs[R_ECX],
-                    &eax, &ebx, &ecx, &edx);
-        env->regs[R_EAX] = eax;
-        env->regs[R_EBX] = ebx;
-        env->regs[R_ECX] = ecx;
-        env->regs[R_EDX] = edx;
-    }
-    
 }
 
 target_ulong helper_read_crN(CPUX86State *env, int reg)
@@ -231,7 +228,7 @@ void helper_rdtsc(CPUX86State *env)
             continue;
         if (!HOOK_BOUND_CHECK(hook, env->eip))
             continue;
-        
+
         // Multiple rdtsc callbacks returning different values is undefined.
         // true -> skip the rdtsc instruction
         if (hook->insn == UC_X86_INS_RDTSC) {
@@ -240,7 +237,7 @@ void helper_rdtsc(CPUX86State *env)
                 cpu_restore_state(uc->cpu, pc, false);
                 synced = true;
             }
-            JIT_CALLBACK_GUARD_VAR(skip_rdtsc, ((uc_cb_insn_cpuid_t)hook->callback)(env->uc, hook->user_data));
+            JIT_CALLBACK_GUARD_VAR(skip_rdtsc, ((uc_cb_insn_rdtsc_t)hook->callback)(env->uc, hook->user_data));
         }
 
         // the last callback may already asked to stop emulation
@@ -275,7 +272,7 @@ void helper_rdtscp(CPUX86State *env)
             continue;
         if (!HOOK_BOUND_CHECK(hook, env->eip))
             continue;
-        
+
         // Multiple rdtscp callbacks returning different values is undefined.
         // true -> skip the rdtscp instruction
         if (hook->insn == UC_X86_INS_RDTSCP) {
@@ -284,7 +281,7 @@ void helper_rdtscp(CPUX86State *env)
                 cpu_restore_state(uc->cpu, pc, false);
                 synced = true;
             }
-            JIT_CALLBACK_GUARD_VAR(skip_rdtscp, ((uc_cb_insn_cpuid_t)hook->callback)(env->uc, hook->user_data));
+            JIT_CALLBACK_GUARD_VAR(skip_rdtscp, ((uc_cb_insn_rdtsc_t)hook->callback)(env->uc, hook->user_data));
         }
 
         // the last callback may already asked to stop emulation
