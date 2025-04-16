@@ -614,6 +614,7 @@ int cpu_exec(struct uc_struct *uc, CPUState *cpu)
             if (unlikely(cpu->exit_request)) {
                 continue;
             }
+            uc->size_recur_mem = 0; // proposed fix for missing mem_* callbacks
             cpu_loop_exec_tb(cpu, tb, &last_tb, &tb_exit);
             /* Try to align the host and virtual clocks
                if the guest is in advance */
