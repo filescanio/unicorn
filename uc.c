@@ -1417,6 +1417,32 @@ uc_err uc_mem_map_ptr(uc_engine *uc, uint64_t address, uint64_t size,
     return res;
 }
 
+static uc_err uc_mem_map_ptr_internal(uc_engine *uc, uint64_t address, uint64_t size,
+                      uint32_t perms, bool dirty,void *ptr)
+{
+    uc_err res;
+    MemoryRegion *mr;
+    UC_INIT(uc);
+
+    if (ptr == NULL) {
+        restore_jit_state(uc);
+        return UC_ERR_ARG;
+    }
+
+    res = mem_map_check(uc, address, size, perms);
+    if (res) {
+        restore_jit_state(uc);
+        return res;
+    }
+
+    res = mem_map(uc, mr = uc->memory_map_ptr(uc, address, size, perms, ptr));
+    if(mr) {
+        mr->dirty = dirty;
+    }
+    restore_jit_state(uc);
+    return res;
+}
+
 UNICORN_EXPORT
 uc_err uc_mmio_map(uc_engine *uc, uint64_t address, uint64_t size,
                    uc_cb_mmio_read_t read_cb, void *user_data_read,
@@ -1560,6 +1586,7 @@ static bool split_region(struct uc_struct *uc, MemoryRegion *mr,
     uint64_t l_size, m_size, r_size;
     RAMBlock *block = NULL;
     bool prealloc = false;
+    bool dirty;
 
     chunk_end = address + size;
 
@@ -1605,6 +1632,7 @@ static bool split_region(struct uc_struct *uc, MemoryRegion *mr,
     perms = mr->perms;
     begin = mr->addr;
     end = mr->end;
+    dirty = mr->dirty;
 
     // unmap this region first, then do split it later
     if (uc_mem_unmap(uc, mr->addr, (uint64_t)int128_get64(mr->size)) !=
@@ -1645,7 +1673,7 @@ static bool split_region(struct uc_struct *uc, MemoryRegion *mr,
                 goto error;
             }
         } else {
-            if (uc_mem_map_ptr(uc, begin, l_size, perms, backup) != UC_ERR_OK) {
+            if (uc_mem_map_ptr_internal(uc, begin, l_size, perms, dirty, backup) != UC_ERR_OK) {
                 goto error;
             }
         }
@@ -1661,8 +1689,7 @@ static bool split_region(struct uc_struct *uc, MemoryRegion *mr,
                 goto error;
             }
         } else {
-            if (uc_mem_map_ptr(uc, address, m_size, perms, backup + l_size) !=
-                UC_ERR_OK) {
+            if (uc_mem_map_ptr_internal(uc, address, m_size, perms, dirty, backup + l_size) != UC_ERR_OK) {
                 goto error;
             }
         }
@@ -1678,8 +1705,7 @@ static bool split_region(struct uc_struct *uc, MemoryRegion *mr,
                 goto error;
             }
         } else {
-            if (uc_mem_map_ptr(uc, chunk_end, r_size, perms,
-                               backup + l_size + m_size) != UC_ERR_OK) {
+            if (uc_mem_map_ptr_internal(uc, chunk_end, r_size, perms, dirty, backup + l_size + m_size) != UC_ERR_OK) {
                 goto error;
             }
         }
