@@ -657,6 +657,66 @@ static void test_smc(void)
     OK(uc_close(uc));
 }
 
+static void test_smc2_callback(uc_engine *uc, uint64_t addr,
+                                                  size_t size, void *data)
+{
+    if(addr == 7) {
+        /* set executable flag _after_ page was already accessed, MMU set */
+        uc_mem_protect(uc, 0x2000, 0x1000, UC_PROT_READ|UC_PROT_WRITE|UC_PROT_EXEC);
+    }
+}
+
+static void test_smc2_dummy_callback(uc_engine *uc, uc_mem_type type, uint64_t address, int size, int64_t value, void *user_data)
+{
+    /* this is only a dummy callback */
+}
+
+static void test_smc2(void)
+{
+    uc_engine *uc;
+    uc_hook hk;
+    uint64_t r_rax, r_rcx;
+    uint64_t r_rsp;
+
+    char code_func[] = "\x90\x90\x90\x90\x90\x90\x90\x90\xB8\x78\x56\x34\x12\xC3"; // ret 0x12345678
+    char code_main[] = 
+        "\xC6\x05\xff\x20\x00\x00\x55"      // mov byte ptr [0x20ff],0x55  ; access function page w/o exec bit set
+        "\xB8\x00\x20\x00\x00"              // mov eax,0x2000              ; meanwhile code hook sets exec bit on page 0x2000
+        "\xFF\xD0"                          // call eax
+        "\x89\xC1"                          // mov ecx,eax
+        "\xC6\x05\x0c\x20\x00\x00\x55"      // mov byte ptr [0x200c],0x55  ; rewrite function
+        "\xB8\x00\x20\x00\x00"              // mov eax,0x2000
+        "\xFF\xD0";                         // call eax
+
+    r_rax = 0xaaaa;
+    r_rcx = 0xcccc;
+    r_rsp = 0x5000;
+    printf("\n");
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_reg_write(uc, UC_X86_REG_ESP, &r_rsp));
+    OK(uc_mem_map  (uc, 0x0,    0x1000, UC_PROT_ALL));                // text
+    OK(uc_mem_map  (uc, 0x4000, 0x1000, UC_PROT_READ|UC_PROT_WRITE)); // stack
+    OK(uc_mem_map  (uc, 0x2000,0x1000, UC_PROT_READ|UC_PROT_WRITE)); // another text
+
+    OK(uc_hook_add(uc, &hk, UC_HOOK_CODE, test_smc2_callback, NULL, 1, 0));
+
+    //install dummy mem read hook so that tlb_reset_dirty_by_vaddr() will not be called in tb_gen_code()
+    OK(uc_hook_add(uc, &hk, UC_HOOK_MEM_WRITE, test_smc2_dummy_callback, NULL, 1, 0));
+
+
+    OK(uc_mem_write(uc, 0x2000,    code_func,   sizeof(code_func)-1));
+    OK(uc_mem_write(uc, 0x0,        code_main,   sizeof(code_main)-1));
+    OK(uc_emu_start(uc, 0x0, sizeof(code_main)-1, 0, 0));
+
+    OK(uc_reg_read(uc, UC_X86_REG_EAX, &r_rax));
+    OK(uc_reg_read(uc, UC_X86_REG_ECX, &r_rcx));
+
+    TEST_CHECK(r_rax == 0x55345678);
+    TEST_CHECK(r_rcx == 0x12345678);
+
+    OK(uc_close(uc));
+}
+
 /*
  * Ensures that a code section initially as RW, if marked later as RX
  * still works as expected
@@ -703,4 +763,5 @@ TEST_LIST = {{"test_map_correct", test_map_correct},
              {"test_mem_addr_size_wraparound", test_mem_addr_size_wraparound},
              {"test_smc", test_smc},
              {"test_tlbdirty_exec", test_tlbdirty_exec},
+             {"test_smc2", test_smc2},
              {NULL, NULL}};
