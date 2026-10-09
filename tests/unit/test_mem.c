@@ -741,8 +741,7 @@ static void test_smc2(void)
     // Callback to set page to RWX.
     OK(uc_hook_add(uc, &hk, UC_HOOK_CODE, test_smc2_callback, NULL, 7, 8));
 
-    // Install dummy mem write hook so that tlb_reset_dirty_by_vaddr() will not
-    // be called in tb_gen_code()
+    // a write hook forces the stores to the slow path (TLB_SLOWPATH)
     OK(uc_hook_add(uc, &hk, UC_HOOK_MEM_WRITE, test_smc2_dummy_callback, NULL,
                    1, 0));
 
@@ -1777,6 +1776,74 @@ static void test_smc_code_on_untracked_page(void)
     OK(uc_close(uc));
 }
 
+static void test_dirty_after_clear_hook(uc_engine *uc, uint64_t address,
+                                        uint32_t size, void *user_data)
+{
+    *(bool *)user_data = uc_mem_get_dirty(uc, 0x3000, 0x1000);
+}
+
+// uc_mem_get_dirty() clears the dirty flag, a later store to the region must
+// set it again, also on an executable page without code whose stores are
+// otherwise no longer tracked after the first one.
+static void test_mem_dirty_after_clear(void)
+{
+    uc_engine *uc;
+    uc_hook h;
+    bool first = false;
+    // 1000: mov dword [0x3000], 1   ; first store to the page
+    // 100a: mov dword [0x3004], 2   ; hook clears the flag before this one
+    // 1014: nop
+    char code[] = "\xC7\x05\x00\x30\x00\x00\x01\x00\x00\x00\xC7\x05\x04\x30"
+                  "\x00\x00\x02\x00\x00\x00\x90";
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x3000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_write(uc, 0x1000, code, sizeof(code) - 1));
+    TEST_CHECK(!uc_mem_get_dirty(uc, 0x3000, 0x1000));
+    OK(uc_hook_add(uc, &h, UC_HOOK_CODE, test_dirty_after_clear_hook, &first,
+                   0x100a, 0x100a));
+
+    OK(uc_emu_start(uc, 0x1000, 0x1014, 0, 0));
+
+    TEST_CHECK(first);
+    TEST_CHECK(uc_mem_get_dirty(uc, 0x3000, 0x1000));
+    TEST_MSG("second store did not set the dirty flag");
+    TEST_CHECK(!uc_mem_get_dirty(uc, 0x3000, 0x1000));
+
+    OK(uc_close(uc));
+}
+
+// Stores to a region without exec permission set its dirty flag too, also
+// after the flag was cleared.
+static void test_mem_dirty_no_exec(void)
+{
+    uc_engine *uc;
+    uc_hook h;
+    bool first = false;
+    // same code as test_mem_dirty_after_clear, 0x3000 is read/write only
+    char code[] = "\xC7\x05\x00\x30\x00\x00\x01\x00\x00\x00\xC7\x05\x04\x30"
+                  "\x00\x00\x02\x00\x00\x00\x90";
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x3000, 0x1000, UC_PROT_READ | UC_PROT_WRITE));
+    OK(uc_mem_write(uc, 0x1000, code, sizeof(code) - 1));
+    TEST_CHECK(!uc_mem_get_dirty(uc, 0x3000, 0x1000));
+    OK(uc_hook_add(uc, &h, UC_HOOK_CODE, test_dirty_after_clear_hook, &first,
+                   0x100a, 0x100a));
+
+    OK(uc_emu_start(uc, 0x1000, 0x1014, 0, 0));
+
+    TEST_CHECK(first);
+    TEST_MSG("first store did not set the dirty flag");
+    TEST_CHECK(uc_mem_get_dirty(uc, 0x3000, 0x1000));
+    TEST_MSG("second store did not set the dirty flag");
+    TEST_CHECK(!uc_mem_get_dirty(uc, 0x3000, 0x1000));
+
+    OK(uc_close(uc));
+}
+
 TEST_LIST = {{"test_map_correct", test_map_correct},
              {"test_map_wrapping", test_map_wrapping},
              {"test_mem_protect", test_mem_protect},
@@ -1829,4 +1896,6 @@ TEST_LIST = {{"test_map_correct", test_map_correct},
              {"test_smc_two_stores_same_page", test_smc_two_stores_same_page},
              {"test_smc_code_on_untracked_page",
               test_smc_code_on_untracked_page},
+             {"test_mem_dirty_after_clear", test_mem_dirty_after_clear},
+             {"test_mem_dirty_no_exec", test_mem_dirty_no_exec},
              {NULL, NULL}};

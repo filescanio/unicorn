@@ -668,25 +668,6 @@ static void tlb_reset_dirty_range_locked(struct uc_struct *uc, CPUTLBEntry *tlb_
     }
 }
 
-static void tlb_reset_dirty_range_by_vaddr_locked(struct uc_struct *uc, CPUTLBEntry *tlb_entry,
-                                                  target_ulong start, target_ulong length)
-{
-    uintptr_t addr = tlb_entry->addr_write;
-
-    if ((addr & (TLB_INVALID_MASK | TLB_MMIO |
-                 TLB_DISCARD_WRITE | TLB_NOTDIRTY)) == 0) {
-        addr &= TARGET_PAGE_MASK;
-        if ((addr - start) < length) {
-#if TCG_OVERSIZED_GUEST
-            tlb_entry->addr_write |= TLB_NOTDIRTY;
-#else
-            tlb_entry->addr_write = tlb_entry->addr_write | TLB_NOTDIRTY;
-#endif
-        }
-    }
-}
-
-
 /*
  * Called with tlb_c.lock held.
  * Called only from the vCPU context, i.e. the TLB's owner thread.
@@ -721,30 +702,6 @@ void tlb_reset_dirty(CPUState *cpu, ram_addr_t start1, ram_addr_t length)
         for (i = 0; i < CPU_VTLB_SIZE; i++) {
             tlb_reset_dirty_range_locked(uc, &env_tlb(env)->d[mmu_idx].vtable[i],
                                          start1, length);
-        }
-    }
-}
-
-void tlb_reset_dirty_by_vaddr(CPUState *cpu, target_ulong start1, target_ulong length)
-{
-    struct uc_struct *uc = cpu->uc;
-    CPUArchState *env;
-
-    int mmu_idx;
-
-    env = cpu->env_ptr;
-    for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
-        unsigned int i;
-        unsigned int n = tlb_n_entries(&env_tlb(env)->f[mmu_idx]);
-
-        for (i = 0; i < n; i++) {
-            tlb_reset_dirty_range_by_vaddr_locked(uc, &env_tlb(env)->f[mmu_idx].table[i],
-                                                  start1, length);
-        }
-
-        for (i = 0; i < CPU_VTLB_SIZE; i++) {
-            tlb_reset_dirty_range_by_vaddr_locked(uc, &env_tlb(env)->d[mmu_idx].vtable[i],
-                                                  start1, length);
         }
     }
 }
@@ -900,13 +857,17 @@ void tlb_set_page_with_attrs(CPUState *cpu, target_ulong vaddr,
          * the page is actually writable.
          *
          * The usage of TLB_NOTDIRTY only matters for pages that
-         * could contain TBs, so set TLB_NOTDIRTY only for executable
+         * could contain TBs, so set TLB_NOTDIRTY for executable
          * memory sections.
+         * Unicorn: and for regions whose dirty flag (uc_mem_get_dirty) is
+         * clear, as only stores on the slow path set it. notdirty_write()
+         * stops tracking the page after the first store.
          */
         if (prot & PAGE_WRITE) {
             if (section->readonly) {
                 write_address |= TLB_DISCARD_WRITE;
-            } else if ((section->mr->perms & UC_PROT_EXEC) &&
+            } else if (((section->mr->perms & UC_PROT_EXEC) ||
+                        !section->mr->dirty) &&
                        cpu_physical_memory_is_clean(iotlb)) {
                 write_address |= TLB_NOTDIRTY;
             }

@@ -159,6 +159,10 @@ typedef void (*uc_invalidate_tb_t)(struct uc_struct *uc, uint64_t start,
 typedef void (*uc_invalidate_region_tb_t)(struct uc_struct *uc,
                                           MemoryRegion *mr);
 
+// Track the writes to the pages of a RAM memory region again (TLB_NOTDIRTY)
+typedef void (*uc_track_region_writes_t)(struct uc_struct *uc,
+                                         MemoryRegion *mr);
+
 // Request generating TB at given address
 typedef uc_err (*uc_gen_tb_t)(struct uc_struct *uc, uint64_t pc, uc_tb *out_tb);
 
@@ -349,6 +353,7 @@ struct uc_struct {
     uc_tcg_reset_dirty_tlb_t tcg_reset_dirty_tlb;
     uc_invalidate_tb_t uc_invalidate_tb;
     uc_invalidate_region_tb_t uc_invalidate_region_tb;
+    uc_track_region_writes_t track_region_writes;
     uc_gen_tb_t uc_gen_tb;
     uc_tb_flush_t tb_flush;
     uc_add_inline_hook_t add_inline_hook;
