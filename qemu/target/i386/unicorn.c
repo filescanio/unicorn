@@ -186,6 +186,17 @@ static void reg_reset(struct uc_struct *uc)
 
         cpu_x86_update_cr0(env, CR0_PE_MASK); // protected mode
         cpu_x86_update_cr4(env, cr4);
+
+        if (uc->mode == UC_MODE_32) {
+            // The real mode reset state sets HF_ADDSEG, which adds the segment
+            // base to every memory access. In protected mode it is only
+            // needed if a DS/ES/SS base is not 0, as computed by
+            // cpu_x86_load_seg_cache() when a segment is loaded later.
+            env->hflags &= ~HF_ADDSEG_MASK;
+            env->hflags |= ((env->segs[R_DS].base | env->segs[R_ES].base |
+                             env->segs[R_SS].base) != 0)
+                           << HF_ADDSEG_SHIFT;
+        }
         break;
     }
     default:
