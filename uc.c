@@ -1943,6 +1943,10 @@ uc_err uc_mem_protect(struct uc_struct *uc, uint64_t address, uint64_t size,
             if (((mr->perms & UC_PROT_EXEC) != 0) &&
                 ((perms & UC_PROT_EXEC) == 0)) {
                 remove_exec = true;
+                // Writes to non-executable memory do not invalidate TBs, so
+                // the code translated from this region could become stale
+                // while it is not executable and run when it is again.
+                uc->uc_invalidate_region_tb(uc, mr);
             }
             add_exec = ((mr->perms & UC_PROT_EXEC) == 0) &&
                        ((perms & UC_PROT_EXEC) != 0);

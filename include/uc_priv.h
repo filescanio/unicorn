@@ -155,6 +155,10 @@ typedef void (*uc_tcg_reset_dirty_tlb_t)(struct uc_struct *uc,
 typedef void (*uc_invalidate_tb_t)(struct uc_struct *uc, uint64_t start,
                                    size_t len);
 
+// Invalidate all TBs translated from the given RAM memory region
+typedef void (*uc_invalidate_region_tb_t)(struct uc_struct *uc,
+                                          MemoryRegion *mr);
+
 // Request generating TB at given address
 typedef uc_err (*uc_gen_tb_t)(struct uc_struct *uc, uint64_t pc, uc_tb *out_tb);
 
@@ -344,6 +348,7 @@ struct uc_struct {
     uc_tcg_flush_tlb tcg_flush_tlb;
     uc_tcg_reset_dirty_tlb_t tcg_reset_dirty_tlb;
     uc_invalidate_tb_t uc_invalidate_tb;
+    uc_invalidate_region_tb_t uc_invalidate_region_tb;
     uc_gen_tb_t uc_gen_tb;
     uc_tb_flush_t tb_flush;
     uc_add_inline_hook_t add_inline_hook;

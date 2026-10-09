@@ -1129,6 +1129,18 @@ static void uc_tb_flush(struct uc_struct *uc) {
     tb_exec_lock(uc);
 }
 
+/*
+ * Unicorn: invalidate all TBs translated from the RAM region @mr. Unlike
+ * uc_invalidate_tb() it works on the physical region, independent of the
+ * guest MMU.
+ */
+static void uc_invalidate_region_tb(struct uc_struct *uc, MemoryRegion *mr)
+{
+    ram_addr_t start = memory_region_get_ram_addr(mr);
+
+    tb_invalidate_phys_range(uc, start, start + int128_get64(mr->size));
+}
+
 static void uc_invalidate_tb(struct uc_struct *uc, uint64_t start_addr, size_t len) 
 {
     tb_page_addr_t start, end;
@@ -1251,6 +1263,7 @@ void tcg_exec_init(struct uc_struct *uc, uint32_t tb_size)
     uc->l1_map = g_malloc0(sizeof(void *) * V_L1_MAX_SIZE);
     /* Invalidate / Cache TBs */
     uc->uc_invalidate_tb = uc_invalidate_tb;
+    uc->uc_invalidate_region_tb = uc_invalidate_region_tb;
     uc->uc_gen_tb = uc_gen_tb;
     uc->tb_flush = uc_tb_flush;
 

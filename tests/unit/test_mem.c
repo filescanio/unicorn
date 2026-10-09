@@ -1630,6 +1630,88 @@ static void test_mem_hook_changes_mapping(void)
     test_mem_hook_mapping_run(true, true);
 }
 
+typedef struct {
+    int faults;
+    bool readd_exec;
+} remove_exec_cached_data;
+
+static void test_mem_remove_exec_cached_intr_cb(uc_engine *uc, uint32_t intno,
+                                                void *user_data)
+{
+    // remove the X permission of the code at 0x2000 that was executed
+    OK(uc_mem_protect(uc, 0x2000, 0x1000, UC_PROT_READ | UC_PROT_WRITE));
+}
+
+static bool test_mem_remove_exec_cached_fetch_cb(uc_engine *uc,
+                                                 uc_mem_type type,
+                                                 uint64_t address, int size,
+                                                 int64_t value,
+                                                 void *user_data)
+{
+    remove_exec_cached_data *data = user_data;
+
+    data->faults++;
+    if (!data->readd_exec) {
+        return false;
+    }
+    OK(uc_mem_protect(uc, 0x2000, 0x1000, UC_PROT_ALL));
+    return true;
+}
+
+static void test_mem_remove_exec_cached_run(bool readd_exec)
+{
+    uc_engine *uc;
+    uc_hook hk_intr, hk_fetch;
+    remove_exec_cached_data data = {0, readd_exec};
+    uint32_t eax = 0, eip, esp = 0x4800;
+    // 1000: call 0x2000             ; executes (and caches) the code at 0x2000
+    // 1005: int3                    ; the hook removes X from page 0x2000
+    // 1006: mov dword [0x2001], 4   ; the guest rewrites it while it has no X
+    // 1010: call 0x2000
+    // 1015: nop
+    char code1[] = "\xE8\xFB\x0F\x00\x00\xCC\xC7\x05\x01\x20\x00\x00\x04\x00"
+                   "\x00\x00\xE8\xEB\x0F\x00\x00\x90";
+    // 2000: mov eax, 3 ; ret
+    char code2[] = "\xB8\x03\x00\x00\x00\xC3";
+    uc_err err;
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x2000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x4000, 0x1000, UC_PROT_READ | UC_PROT_WRITE));
+    OK(uc_mem_write(uc, 0x1000, code1, sizeof(code1) - 1));
+    OK(uc_mem_write(uc, 0x2000, code2, sizeof(code2) - 1));
+    OK(uc_reg_write(uc, UC_X86_REG_ESP, &esp));
+    OK(uc_hook_add(uc, &hk_intr, UC_HOOK_INTR,
+                   test_mem_remove_exec_cached_intr_cb, NULL, 1, 0));
+    OK(uc_hook_add(uc, &hk_fetch, UC_HOOK_MEM_FETCH_PROT,
+                   test_mem_remove_exec_cached_fetch_cb, &data, 1, 0));
+
+    err = uc_emu_start(uc, 0x1000, 0x1015, 0, 0);
+    OK(uc_reg_read(uc, UC_X86_REG_EAX, &eax));
+    OK(uc_reg_read(uc, UC_X86_REG_EIP, &eip));
+    // the second call must fetch the page again: no stale translated code
+    TEST_CHECK(data.faults == 1);
+    if (readd_exec) {
+        OK(err);
+        TEST_CHECK(eax == 4);
+    } else {
+        uc_assert_err(UC_ERR_FETCH_PROT, err);
+        TEST_CHECK(eip == 0x2000);
+    }
+
+    OK(uc_close(uc));
+}
+
+// Code translated from a page must not be executed any more once the page
+// lost its X permission: the guest may change it without the translation
+// being invalidated, and it must fault when executed.
+static void test_mem_remove_exec_cached(void)
+{
+    test_mem_remove_exec_cached_run(true);
+    test_mem_remove_exec_cached_run(false);
+}
+
 TEST_LIST = {{"test_map_correct", test_map_correct},
              {"test_map_wrapping", test_map_wrapping},
              {"test_mem_protect", test_mem_protect},
@@ -1678,4 +1760,5 @@ TEST_LIST = {{"test_map_correct", test_map_correct},
              {"test_mem_read_prot_handled", test_mem_read_prot_handled},
              {"test_mem_write_prot_handled", test_mem_write_prot_handled},
              {"test_mem_hook_changes_mapping", test_mem_hook_changes_mapping},
+             {"test_mem_remove_exec_cached", test_mem_remove_exec_cached},
              {NULL, NULL}};
