@@ -1310,6 +1310,102 @@ static void test_mem_unaligned_load_fault(void)
     OK(uc_close(uc));
 }
 
+static void test_mem_stop_in_hook_cb(uc_engine *uc, uc_mem_type type,
+                                     uint64_t address, int size,
+                                     int64_t value, void *user_data)
+{
+    int *count = user_data;
+
+    (*count)++;
+    OK(uc_emu_stop(uc));
+}
+
+static void test_mem_stop_run(int hook_type, uint32_t expect_eip,
+                              uint32_t expect_ebx, int expect_calls)
+{
+    uc_engine *uc;
+    uc_hook hk;
+    int calls = 0;
+    uint32_t eip, ebx = 0;
+    // 1000: mov eax, dword ptr [0x2000]
+    // 1005: inc ebx
+    // 1006: mov dword ptr [0x2004], eax
+    // 100b: inc ebx
+    char code[] = "\xA1\x00\x20\x00\x00\x43\xA3\x04\x20\x00\x00\x43";
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x2000, 0x1000, UC_PROT_READ | UC_PROT_WRITE));
+    OK(uc_mem_write(uc, 0x1000, code, sizeof(code) - 1));
+    OK(uc_reg_write(uc, UC_X86_REG_EBX, &ebx));
+    OK(uc_hook_add(uc, &hk, hook_type, test_mem_stop_in_hook_cb, &calls,
+                   0x2000, 0x2fff));
+
+    OK(uc_emu_start(uc, 0x1000, 0x1000 + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_EIP, &eip));
+    OK(uc_reg_read(uc, UC_X86_REG_EBX, &ebx));
+    TEST_CHECK(eip == expect_eip);
+    TEST_MSG("eip 0x%x, expected 0x%x", eip, expect_eip);
+    TEST_CHECK(ebx == expect_ebx);
+    TEST_CHECK(calls == expect_calls);
+
+    OK(uc_close(uc));
+}
+
+// uc_emu_stop() in a memory hook stops at the instruction doing the access,
+// no later instruction is executed.
+static void test_mem_stop_in_hook(void)
+{
+    test_mem_stop_run(UC_HOOK_MEM_READ, 0x1000, 0, 1);
+    test_mem_stop_run(UC_HOOK_MEM_READ_AFTER, 0x1000, 0, 1);
+    test_mem_stop_run(UC_HOOK_MEM_WRITE, 0x1006, 1, 1);
+}
+
+// An invalid store stops at the storing instruction.
+static void test_mem_stop_on_invalid_store(void)
+{
+    uc_engine *uc;
+    uint32_t eip, ebx = 0;
+    // 1000: inc ebx
+    // 1001: mov dword ptr [0x3000], eax ; 0x3000 is read-only
+    // 1006: inc ebx
+    char code[] = "\x43\xA3\x00\x30\x00\x00\x43";
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x3000, 0x1000, UC_PROT_READ));
+    OK(uc_mem_write(uc, 0x1000, code, sizeof(code) - 1));
+    OK(uc_reg_write(uc, UC_X86_REG_EBX, &ebx));
+
+    uc_assert_err(UC_ERR_WRITE_PROT,
+                  uc_emu_start(uc, 0x1000, 0x1000 + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_EIP, &eip));
+    OK(uc_reg_read(uc, UC_X86_REG_EBX, &ebx));
+    TEST_CHECK(eip == 0x1001);
+    TEST_CHECK(ebx == 1);
+
+    OK(uc_close(uc));
+}
+
+// A timeout stops a loop doing only memory accesses.
+static void test_mem_stop_timeout(void)
+{
+    uc_engine *uc;
+    // 1000: mov eax, dword ptr [0x2000]
+    // 1005: mov dword ptr [0x2004], eax
+    // 100a: jmp 0x1000
+    char code[] = "\xA1\x00\x20\x00\x00\xA3\x04\x20\x00\x00\xEB\xF4";
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x2000, 0x1000, UC_PROT_READ | UC_PROT_WRITE));
+    OK(uc_mem_write(uc, 0x1000, code, sizeof(code) - 1));
+
+    OK(uc_emu_start(uc, 0x1000, 0x1000 + sizeof(code) - 1, 100000, 0));
+
+    OK(uc_close(uc));
+}
+
 TEST_LIST = {{"test_map_correct", test_map_correct},
              {"test_map_wrapping", test_map_wrapping},
              {"test_mem_protect", test_mem_protect},
@@ -1351,4 +1447,7 @@ TEST_LIST = {{"test_map_correct", test_map_correct},
              {"test_mem_unaligned_store_prot", test_mem_unaligned_store_prot},
              {"test_mem_unaligned_load_prot", test_mem_unaligned_load_prot},
              {"test_mem_unaligned_load_fault", test_mem_unaligned_load_fault},
+             {"test_mem_stop_in_hook", test_mem_stop_in_hook},
+             {"test_mem_stop_on_invalid_store", test_mem_stop_on_invalid_store},
+             {"test_mem_stop_timeout", test_mem_stop_timeout},
              {NULL, NULL}};

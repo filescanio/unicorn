@@ -1524,6 +1524,42 @@ static void *atomic_mmu_lookup(CPUArchState *env, target_ulong addr,
 typedef uint64_t FullLoadHelper(CPUArchState *env, target_ulong addr,
                                 TCGMemOpIdx oi, uintptr_t retaddr);
 
+/*
+ * Unicorn: leave the TB if an exit was requested (uc_emu_stop(), invalid
+ * memory access, timeout, ...). @retaddr is the return address into the TB,
+ * the state is restored to the instruction it belongs to.
+ */
+static inline void uc_check_exit_request(struct uc_struct *uc,
+                                         uintptr_t retaddr)
+{
+    if (!cpu_loop_exit_requested(uc->cpu)) {
+        return;
+    }
+
+    // There are stil something we have to before exiting to be compatible with previous behaviors
+
+    // from cpu_tb_exec
+    if (uc->nested_level == 1) {
+        // Only unlock (allow writing to JIT area) if we are the outmost uc_emu_start
+        tb_exec_unlock(uc);
+    }
+    uc->cpu->tcg_exit_req = 0;
+
+    if (uc->skip_sync_pc_on_exit) {
+        uc->skip_sync_pc_on_exit = false;
+        cpu_loop_exit(uc->cpu);
+    } else {
+        cpu_loop_exit_restore(uc->cpu, retaddr);
+    }
+}
+
+void HELPER(check_exit_request)(void *p, uint32_t in_delay_slot)
+{
+    if (!in_delay_slot) {
+        uc_check_exit_request(p, GETPC());
+    }
+}
+
 /* Flags of load_helper_flg() and store_helper_flg() */
 enum {
     /* part of an unaligned access split by the helper: no read/write hooks */
@@ -1959,7 +1995,16 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
             uintptr_t retaddr, MemOp op, bool code_read,
             FullLoadHelper *full_load)
 {
-    return load_helper_flg(env, addr, oi, retaddr, op, code_read, full_load, 0);
+    uint64_t res;
+
+    res = load_helper_flg(env, addr, oi, retaddr, op, code_read, full_load, 0);
+
+    // Unicorn: hooks and errors only happen here, not on the TLB fast path,
+    // so leave the TB right after the access if an exit was requested
+    if (!code_read && retaddr && uc_mem_helpers_check_exit(env->uc)) {
+        uc_check_exit_request(env->uc, retaddr);
+    }
+    return res;
 }
 
 /*
@@ -2594,6 +2639,12 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
              TCGMemOpIdx oi, uintptr_t retaddr, MemOp op)
 {
     store_helper_flg(env, addr, val, oi, retaddr, op, 0);
+
+    // Unicorn: hooks and errors only happen here, not on the TLB fast path,
+    // so leave the TB right after the access if an exit was requested
+    if (retaddr && uc_mem_helpers_check_exit(env->uc)) {
+        uc_check_exit_request(env->uc, retaddr);
+    }
 }
 
 void helper_ret_stb_mmu(CPUArchState *env, target_ulong addr, uint8_t val,
