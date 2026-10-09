@@ -987,6 +987,245 @@ static void test_mem_hook_page_add_in_callback(void)
     OK(uc_close(uc));
 }
 
+typedef struct {
+    int count;
+    uint64_t offset[8];
+    uint64_t value[8];
+} mmio_store_log;
+
+static void test_mem_unaligned_mmio_store_cb(uc_engine *uc, uint64_t offset,
+                                             unsigned size, uint64_t value,
+                                             void *user_data)
+{
+    mmio_store_log *log = user_data;
+
+    TEST_CHECK(size == 1);
+    if (log->count < 8) {
+        log->offset[log->count] = offset;
+        log->value[log->count] = value;
+    }
+    log->count++;
+}
+
+static uint64_t test_mem_unaligned_mmio_load_cb(uc_engine *uc, uint64_t offset,
+                                                unsigned size, void *user_data)
+{
+    return 0;
+}
+
+// Unaligned stores are split into byte stores. Each byte must be written to
+// MMIO exactly once.
+static void test_mem_unaligned_mmio_store(void)
+{
+    uc_engine *uc;
+    mmio_store_log log = {0};
+    uint8_t ram[2];
+    // mov dword ptr [0x3001], 0x44332211
+    char code_mmio[] = "\xC7\x05\x01\x30\x00\x00\x11\x22\x33\x44";
+    // mov dword ptr [0x2ffe], 0x44332211 ; two bytes RAM, two bytes MMIO
+    char code_cross[] = "\xC7\x05\xfe\x2f\x00\x00\x11\x22\x33\x44";
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x2000, 0x1000, UC_PROT_READ | UC_PROT_WRITE));
+    OK(uc_mmio_map(uc, 0x3000, 0x1000, test_mem_unaligned_mmio_load_cb, NULL,
+                   test_mem_unaligned_mmio_store_cb, &log));
+
+    OK(uc_mem_write(uc, 0x1000, code_mmio, sizeof(code_mmio) - 1));
+    OK(uc_emu_start(uc, 0x1000, 0x1000 + sizeof(code_mmio) - 1, 0, 0));
+    TEST_CHECK(log.count == 4);
+    TEST_CHECK(log.offset[0] == 1 && log.value[0] == 0x11);
+    TEST_CHECK(log.offset[1] == 2 && log.value[1] == 0x22);
+    TEST_CHECK(log.offset[2] == 3 && log.value[2] == 0x33);
+    TEST_CHECK(log.offset[3] == 4 && log.value[3] == 0x44);
+
+    memset(&log, 0, sizeof(log));
+    OK(uc_mem_write(uc, 0x1000, code_cross, sizeof(code_cross) - 1));
+    OK(uc_emu_start(uc, 0x1000, 0x1000 + sizeof(code_cross) - 1, 0, 0));
+    TEST_CHECK(log.count == 2);
+    TEST_CHECK(log.offset[0] == 0 && log.value[0] == 0x33);
+    TEST_CHECK(log.offset[1] == 1 && log.value[1] == 0x44);
+    OK(uc_mem_read(uc, 0x2ffe, ram, sizeof(ram)));
+    TEST_CHECK(ram[0] == 0x11 && ram[1] == 0x22);
+
+    OK(uc_close(uc));
+}
+
+static void test_mem_unaligned_store_stop_cb(uc_engine *uc, uc_mem_type type,
+                                             uint64_t address, int size,
+                                             int64_t value, void *user_data)
+{
+    OK(uc_emu_stop(uc));
+}
+
+// uc_emu_stop() called from a write hook must not drop an unaligned store
+static void test_mem_unaligned_store_stop_in_hook(void)
+{
+    uc_engine *uc;
+    uc_hook hk;
+    uint32_t mem = 0;
+    // mov dword ptr [0x2ffe], 0x44332211 ; crosses into the next page
+    char code[] = "\xC7\x05\xfe\x2f\x00\x00\x11\x22\x33\x44";
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x2000, 0x2000, UC_PROT_READ | UC_PROT_WRITE));
+    OK(uc_mem_write(uc, 0x1000, code, sizeof(code) - 1));
+    OK(uc_hook_add(uc, &hk, UC_HOOK_MEM_WRITE, test_mem_unaligned_store_stop_cb,
+                   NULL, 0x2000, 0x3fff));
+
+    OK(uc_emu_start(uc, 0x1000, 0x1000 + sizeof(code) - 1, 0, 0));
+    OK(uc_mem_read(uc, 0x2ffe, &mem, sizeof(mem)));
+    TEST_CHECK(LEINT32(mem) == 0x44332211);
+
+    OK(uc_close(uc));
+}
+
+typedef struct {
+    int count;
+    uint64_t address;
+    int size;
+} unaligned_store_prot_data;
+
+static bool test_mem_unaligned_store_prot_cb(uc_engine *uc, uc_mem_type type,
+                                             uint64_t address, int size,
+                                             int64_t value, void *user_data)
+{
+    unaligned_store_prot_data *data = user_data;
+
+    data->count++;
+    data->address = address;
+    data->size = size;
+    return false;
+}
+
+// An unaligned store crossing into a non-writable page must not write any
+// byte, and the write protection hook is called once for the faulting byte.
+static void test_mem_unaligned_store_prot(void)
+{
+    uc_engine *uc;
+    uc_hook hk;
+    unaligned_store_prot_data data = {0};
+    uint32_t mem;
+    uint32_t initial = LEINT32(0xdeadbeef);
+    // mov dword ptr [0x2ffe], 0x44332211 ; 0x3000 is not writable
+    char code[] = "\xC7\x05\xfe\x2f\x00\x00\x11\x22\x33\x44";
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x2000, 0x1000, UC_PROT_READ | UC_PROT_WRITE));
+    OK(uc_mem_map(uc, 0x3000, 0x1000, UC_PROT_READ));
+    OK(uc_mem_write(uc, 0x1000, code, sizeof(code) - 1));
+    OK(uc_mem_write(uc, 0x2ffe, &initial, sizeof(initial)));
+    OK(uc_hook_add(uc, &hk, UC_HOOK_MEM_WRITE_PROT,
+                   test_mem_unaligned_store_prot_cb, &data, 1, 0));
+
+    uc_assert_err(UC_ERR_WRITE_PROT,
+                  uc_emu_start(uc, 0x1000, 0x1000 + sizeof(code) - 1, 0, 0));
+    TEST_CHECK(data.count == 1);
+    TEST_CHECK(data.address == 0x3000);
+    TEST_CHECK(data.size == 1);
+    OK(uc_mem_read(uc, 0x2ffe, &mem, sizeof(mem)));
+    TEST_CHECK(LEINT32(mem) == 0xdeadbeef);
+
+    OK(uc_close(uc));
+}
+
+// An unaligned load crossing into a non-readable page must fail
+static void test_mem_unaligned_load_prot(void)
+{
+    uc_engine *uc;
+    // mov eax, dword ptr [0x2ffe] ; 0x3000 is not readable
+    char code[] = "\xA1\xfe\x2f\x00\x00";
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x2000, 0x1000, UC_PROT_READ | UC_PROT_WRITE));
+    OK(uc_mem_map(uc, 0x3000, 0x1000, UC_PROT_WRITE));
+    OK(uc_mem_write(uc, 0x1000, code, sizeof(code) - 1));
+
+    uc_assert_err(UC_ERR_READ_PROT,
+                  uc_emu_start(uc, 0x1000, 0x1000 + sizeof(code) - 1, 0, 0));
+
+    OK(uc_close(uc));
+}
+
+static void test_mem_unaligned_load_fault_intr_cb(uc_engine *uc,
+                                                  uint32_t intno,
+                                                  void *user_data)
+{
+    uint32_t pte = LEINT32(0x3000 | 7);
+
+    TEST_CHECK(intno == 14);
+    if (intno == 14) {
+        // make the page present, the faulting load is executed again
+        OK(uc_mem_write(uc, 0x9000 + 3 * 4, &pte, sizeof(pte)));
+    } else {
+        OK(uc_emu_stop(uc));
+    }
+}
+
+static void test_mem_unaligned_load_fault_read_cb(uc_engine *uc,
+                                                  uc_mem_type type,
+                                                  uint64_t address, int size,
+                                                  int64_t value,
+                                                  void *user_data)
+{
+    int *count = user_data;
+
+    (*count)++;
+}
+
+// A page fault while an unaligned load is split must not disable read hooks
+// and read protection for the rest of the emulation.
+static void test_mem_unaligned_load_fault(void)
+{
+    uc_engine *uc;
+    uc_hook hk_intr, hk_read;
+    int reads = 0;
+    uint32_t pde = LEINT32(0x9000 | 7), pte;
+    uint64_t cr0, cr3 = 0x8000;
+    int i;
+    // mov eax, dword ptr [0x2ffe] ; crosses into 0x3000, not present at first
+    // mov ebx, dword ptr [0x2000]
+    // mov ecx, dword ptr [0x2004]
+    // mov edx, dword ptr [0x5000] ; 0x5000 is not readable
+    char code[] = "\xA1\xfe\x2f\x00\x00"
+                  "\x8B\x1D\x00\x20\x00\x00"
+                  "\x8B\x0D\x04\x20\x00\x00"
+                  "\x8B\x15\x00\x50\x00\x00";
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x0, 0x5000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x5000, 0x1000, UC_PROT_WRITE));
+    OK(uc_mem_map(uc, 0x6000, 0xa000, UC_PROT_ALL));
+    OK(uc_mem_write(uc, 0x1000, code, sizeof(code) - 1));
+
+    // identity mapped paging for the first 64KB, page 0x3000 not present
+    OK(uc_mem_write(uc, 0x8000, &pde, sizeof(pde)));
+    for (i = 0; i < 16; i++) {
+        pte = LEINT32((i << 12) | (i == 3 ? 6 : 7));
+        OK(uc_mem_write(uc, 0x9000 + i * 4, &pte, sizeof(pte)));
+    }
+    OK(uc_reg_write(uc, UC_X86_REG_CR3, &cr3));
+    OK(uc_reg_read(uc, UC_X86_REG_CR0, &cr0));
+    cr0 |= 0x80000001;
+    OK(uc_reg_write(uc, UC_X86_REG_CR0, &cr0));
+
+    OK(uc_hook_add(uc, &hk_intr, UC_HOOK_INTR,
+                   test_mem_unaligned_load_fault_intr_cb, NULL, 1, 0));
+    OK(uc_hook_add(uc, &hk_read, UC_HOOK_MEM_READ,
+                   test_mem_unaligned_load_fault_read_cb, &reads, 0x2000,
+                   0x3fff));
+
+    uc_assert_err(UC_ERR_READ_PROT,
+                  uc_emu_start(uc, 0x1000, 0x1000 + sizeof(code) - 1, 0, 0));
+    // the faulting load is reported again when it is executed again
+    TEST_CHECK(reads == 4);
+
+    OK(uc_close(uc));
+}
+
 TEST_LIST = {{"test_map_correct", test_map_correct},
              {"test_map_wrapping", test_map_wrapping},
              {"test_mem_protect", test_mem_protect},
@@ -1012,6 +1251,12 @@ TEST_LIST = {{"test_map_correct", test_map_correct},
              {"test_smc2", test_smc2},
              {"test_mem_prot", test_mem_prot},
              {"test_mem_prot_write", test_mem_prot_write},
+             {"test_mem_unaligned_mmio_store", test_mem_unaligned_mmio_store},
+             {"test_mem_unaligned_store_stop_in_hook",
+              test_mem_unaligned_store_stop_in_hook},
+             {"test_mem_unaligned_store_prot", test_mem_unaligned_store_prot},
+             {"test_mem_unaligned_load_prot", test_mem_unaligned_load_prot},
+             {"test_mem_unaligned_load_fault", test_mem_unaligned_load_fault},
              {"test_mem_hook_page_slowpath", test_mem_hook_page_slowpath},
              {"test_mem_hook_page_add_del", test_mem_hook_page_add_del},
              {"test_mem_hook_page_add_in_callback",

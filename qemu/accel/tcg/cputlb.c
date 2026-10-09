@@ -1524,6 +1524,14 @@ static void *atomic_mmu_lookup(CPUArchState *env, target_ulong addr,
 typedef uint64_t FullLoadHelper(CPUArchState *env, target_ulong addr,
                                 TCGMemOpIdx oi, uintptr_t retaddr);
 
+/* Flags of load_helper_flg() and store_helper_flg() */
+enum {
+    /* part of an unaligned access split by the helper: no read/write hooks */
+    HLP_FLG_RECURSIVE_RUN = (1u << 0),
+    /* store_helper_flg(): only check that the store is permitted */
+    HLP_FLG_DRY_RUN = (1u << 1),
+};
+
 typedef struct CPUTLBHookState {
     bool synced;
 #ifdef TARGET_ARM
@@ -1596,9 +1604,9 @@ load_memop(const void *haddr, MemOp op)
 }
 
 static inline uint64_t
-load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
-            uintptr_t retaddr, MemOp op, bool code_read,
-            FullLoadHelper *full_load)
+load_helper_flg(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
+                uintptr_t retaddr, MemOp op, bool code_read,
+                FullLoadHelper *full_load, unsigned flags)
 {
     uintptr_t mmu_idx = get_mmuidx(oi);
     uintptr_t index = tlb_index(env, mmu_idx, addr);
@@ -1734,37 +1742,40 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
     }
 
     // now it is read on mapped memory
-    // patch issue #1041 multiple UC_HOOK_MEM callbacks for unaligned access
-    if (!code_read && !uc->size_recur_mem) {
-        // this is date reading
-        HOOK_FOREACH(uc, hook, UC_HOOK_MEM_READ) {
-            if (hook->to_delete)
-                continue;
-            if (!HOOK_BOUND_CHECK(hook, paddr))
-                continue;
-            tlb_hook_state_sync(env, retaddr, &hook_state);
-            JIT_CALLBACK_GUARD(((uc_cb_hookmem_t)hook->callback)(env->uc, UC_MEM_READ, paddr, size, 0, hook->user_data));
-            // the last callback may already asked to stop emulation
-            if (uc->stop_request)
-                break;
-        }
-        tlb_hook_state_restore(env, &hook_state);
+    if (!code_read) {
+        // patch issue #1041 multiple UC_HOOK_MEM callbacks for unaligned access
+        if (!(flags & HLP_FLG_RECURSIVE_RUN)) {
+            // this is date reading
+            HOOK_FOREACH(uc, hook, UC_HOOK_MEM_READ) {
+                if (hook->to_delete)
+                    continue;
+                if (!HOOK_BOUND_CHECK(hook, paddr))
+                    continue;
+                tlb_hook_state_sync(env, retaddr, &hook_state);
+                JIT_CALLBACK_GUARD(((uc_cb_hookmem_t)hook->callback)(env->uc, UC_MEM_READ, paddr, size, 0, hook->user_data));
+                // the last callback may already asked to stop emulation
+                if (uc->stop_request)
+                    break;
+            }
+            tlb_hook_state_restore(env, &hook_state);
 
-        /* Unicorn: Previous callbacks may invalidate TLB, reload everything.
-                    This may have impact on performance but generally fine.
-                    A better approach is not always invalidating tlb but this
-                    might cause more chaos regarding re-entry (nested uc_emu_start).
-        */
-        if (tlb_entry_is_empty(entry)) {
-            tlb_fill(env_cpu(env), addr, size,
-                        access_type, mmu_idx, retaddr);
-            index = tlb_index(env, mmu_idx, addr);
-            entry = tlb_entry(env, mmu_idx, addr);
-            tlb_addr = code_read ? entry->addr_code : entry->addr_read;
-            tlb_addr &= ~TLB_INVALID_MASK;
+            /* Unicorn: Previous callbacks may invalidate TLB, reload everything.
+                        This may have impact on performance but generally fine.
+                        A better approach is not always invalidating tlb but this
+                        might cause more chaos regarding re-entry (nested uc_emu_start).
+            */
+            if (tlb_entry_is_empty(entry)) {
+                tlb_fill(env_cpu(env), addr, size,
+                            access_type, mmu_idx, retaddr);
+                index = tlb_index(env, mmu_idx, addr);
+                entry = tlb_entry(env, mmu_idx, addr);
+                tlb_addr = code_read ? entry->addr_code : entry->addr_read;
+                tlb_addr &= ~TLB_INVALID_MASK;
+            }
         }
 
-        // callback on non-readable memory
+        // callback on non-readable memory, also for each part of an
+        // unaligned access as they may be on different pages
         if (mr != NULL && !(mr->perms & UC_PROT_READ)) {  //non-readable
             handled = false;
             HOOK_FOREACH(uc, hook, UC_HOOK_MEM_READ_PROT) {
@@ -1898,15 +1909,13 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
         target_ulong addr1, addr2;
         uint64_t r1, r2;
         unsigned shift;
-        int old_size;
     do_unaligned_access:
         addr1 = addr & ~((target_ulong)size - 1);
         addr2 = addr1 + size;
-        old_size = uc->size_recur_mem;
-        uc->size_recur_mem = size;
-        r1 = full_load(env, addr1, oi, retaddr);
-        r2 = full_load(env, addr2, oi, retaddr);
-        uc->size_recur_mem = old_size;
+        r1 = load_helper_flg(env, addr1, oi, retaddr, op, code_read, full_load,
+                             flags | HLP_FLG_RECURSIVE_RUN);
+        r2 = load_helper_flg(env, addr2, oi, retaddr, op, code_read, full_load,
+                             flags | HLP_FLG_RECURSIVE_RUN);
         shift = (addr & (size - 1)) * 8;
 
         if (memop_big_endian(op)) {
@@ -1926,7 +1935,7 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
 _out:
     // Unicorn: callback on successful data read
     if (!code_read) {
-        if (!uc->size_recur_mem) { // disabling read callback if in recursive call
+        if (!(flags & HLP_FLG_RECURSIVE_RUN)) { // disabling read callback if in recursive call
             HOOK_FOREACH(uc, hook, UC_HOOK_MEM_READ_AFTER) {
                 if (hook->to_delete)
                     continue;
@@ -1943,6 +1952,14 @@ _out:
     }
 
     return res;
+}
+
+static inline uint64_t
+load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
+            uintptr_t retaddr, MemOp op, bool code_read,
+            FullLoadHelper *full_load)
+{
+    return load_helper_flg(env, addr, oi, retaddr, op, code_read, full_load, 0);
 }
 
 /*
@@ -2229,9 +2246,23 @@ store_memop(void *haddr, uint64_t val, MemOp op)
     }
 }
 
-static inline void
-store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
-             TCGMemOpIdx oi, uintptr_t retaddr, MemOp op)
+/* Extract byte @i of the @size byte store value @val. */
+static inline uint8_t store_byte(uint64_t val, MemOp op, size_t size, size_t i)
+{
+    if (memop_big_endian(op)) {
+        return val >> (((size - 1) * 8) - (i * 8));
+    }
+    return val >> (i * 8);
+}
+
+/*
+ * Returns false if the store failed (error raised) or, for a dry run, if it
+ * is not permitted. A dry run has no side effects: it neither calls hooks nor
+ * raises errors.
+ */
+static inline bool
+store_helper_flg(CPUArchState *env, target_ulong addr, uint64_t val,
+             TCGMemOpIdx oi, uintptr_t retaddr, MemOp op, unsigned flags)
 {
     struct uc_struct *uc = env->uc;
     HOOK_FOREACH_VAR_DECLARE;
@@ -2272,8 +2303,7 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
     // Load the latest memory mapping.
     paddr = entry->paddr | (addr & ~TARGET_PAGE_MASK);
     mr = uc->memory_mapping(uc, paddr);
-
-    if (!uc->size_recur_mem) { // disabling write callback if in recursive call
+    if (!(flags & HLP_FLG_RECURSIVE_RUN)) { // disabling write callback if in recursive call
         // Unicorn: callback on memory write
         HOOK_FOREACH(uc, hook, UC_HOOK_MEM_WRITE) {
             if (hook->to_delete)
@@ -2291,6 +2321,9 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
 
     // Unicorn: callback on invalid memory
     if (mr == NULL) {
+        if (flags & HLP_FLG_DRY_RUN) {
+            return false;
+        }
         handled = false;
         HOOK_FOREACH(uc, hook, UC_HOOK_MEM_WRITE_UNMAPPED) {
             if (hook->to_delete)
@@ -2314,7 +2347,7 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
             uc->invalid_error = UC_ERR_WRITE_UNMAPPED;
             // printf("***** Invalid memory write at " TARGET_FMT_lx "\n", addr);
             cpu_exit(uc->cpu);
-            return;
+            return false;
         } else {
             uc->invalid_error = UC_ERR_OK;
             /* If the TLB entry is for a different page, reload and try again.  */
@@ -2333,7 +2366,7 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
             if (mr == NULL) {
                 uc->invalid_error = UC_ERR_MAP;
                 cpu_exit(uc->cpu);
-                return;
+                return false;
             }
             tlb_hook_state_restore(env, &hook_state);
         }
@@ -2341,6 +2374,9 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
 
     // Unicorn: callback on non-writable memory
     if (mr != NULL && !(mr->perms & UC_PROT_WRITE)) {  //non-writable
+        if (flags & HLP_FLG_DRY_RUN) {
+            return false;
+        }
         // printf("not writable memory???\n");
         handled = false;
         HOOK_FOREACH(uc, hook, UC_HOOK_MEM_WRITE_PROT) {
@@ -2378,8 +2414,14 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
             uc->invalid_error = UC_ERR_WRITE_PROT;
             // printf("***** Invalid memory write (ro) at " TARGET_FMT_lx "\n", addr);
             cpu_exit(uc->cpu);
-            return;
+            return false;
         }
+    }
+
+    /* A dry run only checks that the store is permitted, nothing must be
+       written or changed, not even MMIO. */
+    if (flags & HLP_FLG_DRY_RUN) {
+        return true;
     }
 
     /* this is to replace mem write hooks that are used only to detect overwrites */
@@ -2393,7 +2435,7 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
             uc->invalid_addr = paddr;
             uc->invalid_error = UC_ERR_NOMEM;
             cpu_exit(uc->cpu);
-            return;
+            return false;
         }
         /* refill tlb after CoW */
         tlb_fill(env_cpu(env), addr, size, MMU_DATA_STORE,
@@ -2428,12 +2470,12 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
         if (tlb_addr & TLB_MMIO) {
             io_writex(env, iotlbentry, mmu_idx, val, addr, retaddr,
                       op ^ (need_swap * MO_BSWAP));
-            return;
+            return true;
         }
 
         /* Ignore writes to ROM.  */
         if (unlikely(tlb_addr & TLB_DISCARD_WRITE)) {
-            return;
+            return true;
         }
 
         /* Handle clean RAM pages.  */
@@ -2453,19 +2495,19 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
         } else {
             store_memop(haddr, val, op);
         }
-        return;
+        return true;
     }
 
     /* Handle slow unaligned access (it spans two pages or IO).  */
     if (size > 1
         && unlikely((addr & ~TARGET_PAGE_MASK) + size - 1
                      >= TARGET_PAGE_SIZE)) {
-        int i;
+        size_t i, bad;
         uintptr_t index2;
         CPUTLBEntry *entry2;
         target_ulong page2, tlb_addr2;
         size_t size2;
-        int old_size;
+        //int old_size;
 
     do_unaligned_access:
         /*
@@ -2508,25 +2550,50 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
          * This loop must go in the forward direction to avoid issues
          * with self-modifying code in Windows 64-bit.
          */
-        old_size = uc->size_recur_mem;
-        uc->size_recur_mem = size;
-        for (i = 0; i < size; ++i) {
-            uint8_t val8;
-            if (memop_big_endian(op)) {
-                /* Big-endian extract.  */
-                val8 = val >> (((size - 1) * 8) - (i * 8));
-            } else {
-                /* Little-endian extract.  */
-                val8 = val >> (i * 8);
+
+        /*
+         * Dry run first, so that nothing is written if any byte of the store
+         * is not permitted.
+         */
+        for (bad = 0; bad < size; ++bad) {
+            if (!store_helper_flg(env, addr + bad, store_byte(val, op, size, bad),
+                                  oi, retaddr, MO_UB,
+                                  HLP_FLG_RECURSIVE_RUN | HLP_FLG_DRY_RUN)) {
+                break;
             }
-            helper_ret_stb_mmu(env, addr + i, val8, oi, retaddr);
         }
-        uc->size_recur_mem = old_size;
-        return;
+        if (bad < size) {
+            /*
+             * Store the first non-permitted byte for real: this raises the
+             * error, unless a hook handles it. Nothing is written before it.
+             */
+            if (!store_helper_flg(env, addr + bad, store_byte(val, op, size, bad),
+                                  oi, retaddr, MO_UB, HLP_FLG_RECURSIVE_RUN)) {
+                return false;
+            }
+        }
+        for (i = 0; i < size; ++i) {
+            if (i == bad) {
+                continue;
+            }
+            if (!store_helper_flg(env, addr + i, store_byte(val, op, size, i),
+                                  oi, retaddr, MO_UB, HLP_FLG_RECURSIVE_RUN)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     haddr = (void *)((uintptr_t)addr + entry->addend);
     store_memop(haddr, val, op);
+    return true;
+}
+
+static inline void
+store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
+             TCGMemOpIdx oi, uintptr_t retaddr, MemOp op)
+{
+    store_helper_flg(env, addr, val, oi, retaddr, op, 0);
 }
 
 void helper_ret_stb_mmu(CPUArchState *env, target_ulong addr, uint8_t val,
