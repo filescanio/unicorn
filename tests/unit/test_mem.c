@@ -741,6 +741,153 @@ static void test_tlbdirty_exec(void)
     OK(uc_close(uc));
 }
 
+// mov eax, [0x2000]; mov [0x3000], eax; jmp 0x100c; nop
+// The jmp ends the block, so the until address (the nop) is in another block
+// and the block doing the memory accesses stays cached between runs.
+static const char mem_hook_page_code[] =
+    "\xa1\x00\x20\x00\x00\xa3\x00\x30\x00\x00\xeb\x00\x90";
+
+typedef struct {
+    int reads;
+    int writes;
+} mem_hook_page_counts;
+
+static void test_mem_hook_page_cb(uc_engine *uc, uc_mem_type type,
+                                  uint64_t address, int size, int64_t value,
+                                  void *user_data)
+{
+    mem_hook_page_counts *counts = user_data;
+
+    if (type == UC_MEM_READ) {
+        counts->reads++;
+    } else if (type == UC_MEM_WRITE) {
+        counts->writes++;
+    }
+}
+
+static void test_mem_hook_page_setup(uc_engine **uc)
+{
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, uc));
+    OK(uc_mem_map(*uc, 0x1000, 0x1000, UC_PROT_ALL));
+    // non-exec data, so stores do not take the slowpath for dirty tracking
+    OK(uc_mem_map(*uc, 0x2000, 0x2000, UC_PROT_READ | UC_PROT_WRITE));
+    OK(uc_mem_write(*uc, 0x1000, mem_hook_page_code,
+                    sizeof(mem_hook_page_code) - 1));
+}
+
+static void test_mem_hook_page_run(uc_engine *uc)
+{
+    OK(uc_emu_start(uc, 0x1000, 0x1000 + sizeof(mem_hook_page_code) - 2, 0,
+                    0));
+}
+
+// memory hooks only fire for the pages they cover
+static void test_mem_hook_page_slowpath(void)
+{
+    uc_engine *uc;
+    uc_hook hr, hw, hdummy;
+    mem_hook_page_counts counts = {0}, dummy = {0};
+
+    test_mem_hook_page_setup(&uc);
+    OK(uc_hook_add(uc, &hr, UC_HOOK_MEM_READ, test_mem_hook_page_cb, &counts,
+                   0x2000, 0x2000));
+    OK(uc_hook_add(uc, &hw, UC_HOOK_MEM_WRITE, test_mem_hook_page_cb, &counts,
+                   0x3000, 0x3000));
+    OK(uc_hook_add(uc, &hdummy, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE,
+                   test_mem_hook_page_cb, &dummy, 0x10, 0x10));
+
+    test_mem_hook_page_run(uc);
+
+    TEST_CHECK(counts.reads == 1);
+    TEST_CHECK(counts.writes == 1);
+    TEST_CHECK(dummy.reads == 0 && dummy.writes == 0);
+
+    OK(uc_close(uc));
+}
+
+// memory hooks added after the code was translated and the TLB was filled
+// must fire, and must stop firing once deleted
+static void test_mem_hook_page_add_del(void)
+{
+    uc_engine *uc;
+    uc_hook hr, hw;
+    mem_hook_page_counts counts = {0};
+
+    test_mem_hook_page_setup(&uc);
+    test_mem_hook_page_run(uc);
+
+    OK(uc_hook_add(uc, &hr, UC_HOOK_MEM_READ, test_mem_hook_page_cb, &counts,
+                   0x2000, 0x2000));
+    OK(uc_hook_add(uc, &hw, UC_HOOK_MEM_WRITE, test_mem_hook_page_cb, &counts,
+                   0x3000, 0x3000));
+    test_mem_hook_page_run(uc);
+
+    TEST_CHECK(counts.reads == 1);
+    TEST_CHECK(counts.writes == 1);
+
+    OK(uc_hook_del(uc, hr));
+    OK(uc_hook_del(uc, hw));
+    test_mem_hook_page_run(uc);
+
+    TEST_CHECK(counts.reads == 1);
+    TEST_CHECK(counts.writes == 1);
+
+    OK(uc_close(uc));
+}
+
+// 1000: mov eax, [0x2000]
+// 1005: mov [0x3000], eax
+// 100a: inc ecx
+// 100b: cmp ecx, 2
+// 100e: je 0x1013
+// 1010: int3
+// 1011: jmp 0x1000
+// 1013: nop
+static const char mem_hook_page_loop_code[] =
+    "\xa1\x00\x20\x00\x00\xa3\x00\x30\x00\x00\x41\x83\xf9\x02\x74\x03\xcc"
+    "\xeb\xed\x90";
+
+typedef struct {
+    mem_hook_page_counts counts;
+    uc_hook hr, hw;
+} mem_hook_page_intr_data;
+
+static void test_mem_hook_page_intr_cb(uc_engine *uc, uint32_t intno,
+                                       void *user_data)
+{
+    mem_hook_page_intr_data *data = user_data;
+
+    OK(uc_hook_add(uc, &data->hr, UC_HOOK_MEM_READ, test_mem_hook_page_cb,
+                   &data->counts, 0x2000, 0x2000));
+    OK(uc_hook_add(uc, &data->hw, UC_HOOK_MEM_WRITE, test_mem_hook_page_cb,
+                   &data->counts, 0x3000, 0x3000));
+}
+
+// memory hooks added during emulation must fire for an already translated
+// block that is executed again without being retranslated
+static void test_mem_hook_page_add_in_callback(void)
+{
+    uc_engine *uc;
+    uc_hook hintr;
+    mem_hook_page_intr_data data = {{0}};
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x2000, 0x2000, UC_PROT_READ | UC_PROT_WRITE));
+    OK(uc_mem_write(uc, 0x1000, mem_hook_page_loop_code,
+                    sizeof(mem_hook_page_loop_code) - 1));
+    OK(uc_hook_add(uc, &hintr, UC_HOOK_INTR, test_mem_hook_page_intr_cb,
+                   &data, 1, 0));
+
+    OK(uc_emu_start(uc, 0x1000, 0x1013, 0, 0));
+
+    // the first iteration runs before the hooks are added, the second after
+    TEST_CHECK(data.counts.reads == 1);
+    TEST_CHECK(data.counts.writes == 1);
+
+    OK(uc_close(uc));
+}
+
 TEST_LIST = {{"test_map_correct", test_map_correct},
              {"test_map_wrapping", test_map_wrapping},
              {"test_mem_protect", test_mem_protect},
@@ -764,4 +911,8 @@ TEST_LIST = {{"test_map_correct", test_map_correct},
              {"test_smc", test_smc},
              {"test_tlbdirty_exec", test_tlbdirty_exec},
              {"test_smc2", test_smc2},
+             {"test_mem_hook_page_slowpath", test_mem_hook_page_slowpath},
+             {"test_mem_hook_page_add_del", test_mem_hook_page_add_del},
+             {"test_mem_hook_page_add_in_callback",
+              test_mem_hook_page_add_in_callback},
              {NULL, NULL}};

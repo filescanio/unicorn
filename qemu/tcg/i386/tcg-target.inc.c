@@ -1762,12 +1762,10 @@ static inline void tcg_out_tlb_load(TCGContext *s, TCGReg addrlo, TCGReg addrhi,
        path function argument setup.  */
     tcg_out_mov(s, ttype, r1, addrlo);
 
-    // Unicorn: fast path if hookmem is not enable
-    if (!tcg_uc_has_hookmem(s))
-        tcg_out_opc(s, OPC_JCC_long + JCC_JNE, 0, 0, 0);
-    else
-        /* slow_path, so data access will go via load_helper() */
-        tcg_out_opc(s, OPC_JMP_long, 0, 0, 0);
+    /* Unicorn: pages covered by memory hooks have TLB_SLOWPATH set in their
+       TLB entry, so the compare above fails and the access goes through
+       load_helper()/store_helper() where the hooks are called. */
+    tcg_out_opc(s, OPC_JCC_long + JCC_JNE, 0, 0, 0);
 
     label_ptr[0] = s->code_ptr;
     s->code_ptr += 4;

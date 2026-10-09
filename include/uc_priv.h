@@ -268,6 +268,28 @@ static inline bool _hook_exists_bounded(struct list_item *cur, uint64_t addr)
     return false;
 }
 
+// memory hooks which are called from the load/store slowpath and need
+// TLB_SLOWPATH on the pages they cover
+#define UC_HOOK_MEM_SLOWPATH_MASK                                              \
+    (UC_HOOK_MEM_READ | UC_HOOK_MEM_READ_AFTER | UC_HOOK_MEM_WRITE)
+
+// true if any hook in the list covers at least one address in [begin, end]
+#define HOOK_EXISTS_BOUNDED_RANGE(uc, idx, begin, end)                         \
+    _hook_exists_bounded_range((uc)->hook[idx##_IDX].head, begin, end)
+
+static inline bool _hook_exists_bounded_range(struct list_item *cur,
+                                              uint64_t begin, uint64_t end)
+{
+    while (cur != NULL) {
+        struct hook *hh = (struct hook *)cur->data;
+        if (!hh->to_delete &&
+            (hh->begin > hh->end || (hh->begin <= end && hh->end >= begin)))
+            return true;
+        cur = cur->next;
+    }
+    return false;
+}
+
 // relloc increment, KEEP THIS A POWER OF 2!
 #define MEM_BLOCK_INCR 32
 
