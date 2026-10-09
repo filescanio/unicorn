@@ -448,6 +448,7 @@ static void test_snapshot_unmap(void)
     OK(uc_close(uc));
 }
 
+#ifdef UNICORN_HAS_ARM64
 static void parts_increment(size_t idx, char parts[3])
 {
     if (idx && idx % 3 == 0) {
@@ -526,6 +527,7 @@ static void test_mem_read_and_write_large_memory_block(void)
     OK(uc_mem_unmap(uc, mem_addr, mem_size));
     OK(uc_close(uc));
 }
+#endif
 
 static bool test_v2p_tlb_fill(uc_engine *uc, uint64_t addr, uc_mem_type type,
                                uc_tlb_entry *result, void *user_data)               
@@ -1323,8 +1325,10 @@ TEST_LIST = {{"test_map_correct", test_map_correct},
              {"test_snapshot_with_vtlb", test_snapshot_with_vtlb},
              {"test_context_snapshot", test_context_snapshot},
              {"test_snapshot_unmap", test_snapshot_unmap},
+#ifdef UNICORN_HAS_ARM64
              {"test_mem_read_and_write_large_memory_block",
               test_mem_read_and_write_large_memory_block},
+#endif
              {"test_virtual_to_physical", test_virtual_to_physical},
              {"test_virtual_write", test_virtual_write},
              {"test_mem_addr_size_wraparound", test_mem_addr_size_wraparound},
