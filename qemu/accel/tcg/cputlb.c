@@ -800,6 +800,27 @@ static void tlb_add_large_page(CPUArchState *env, int mmu_idx,
     env_tlb(env)->d[mmu_idx].large_page_mask = lp_mask;
 }
 
+/*
+ * Unicorn: memory read/write hooks are only called from the load/store slow
+ * path. Instead of sending every access there when any such hook exists,
+ * TLB_SLOWPATH is set only on pages covered by a hook. The TLB is flushed
+ * whenever these hooks are added or deleted.
+ */
+static bool uc_mem_read_hook_on_page(struct uc_struct *uc, hwaddr paddr_page)
+{
+    hwaddr last = paddr_page + TARGET_PAGE_SIZE - 1;
+
+    return HOOK_EXISTS_BOUNDED_RANGE(uc, UC_HOOK_MEM_READ, paddr_page, last) ||
+           HOOK_EXISTS_BOUNDED_RANGE(uc, UC_HOOK_MEM_READ_AFTER, paddr_page,
+                                     last);
+}
+
+static bool uc_mem_write_hook_on_page(struct uc_struct *uc, hwaddr paddr_page)
+{
+    return HOOK_EXISTS_BOUNDED_RANGE(uc, UC_HOOK_MEM_WRITE, paddr_page,
+                                     paddr_page + TARGET_PAGE_SIZE - 1);
+}
+
 /* Add a new TLB entry. At most one entry for a given virtual address
  * is permitted. Only a single TARGET_PAGE_SIZE region is mapped, the
  * supplied size is only used by tlb_flush_page.
@@ -947,6 +968,10 @@ void tlb_set_page_with_attrs(CPUState *cpu, target_ulong vaddr,
         if (wp_flags & BP_MEM_READ) {
             tn.addr_read |= TLB_WATCHPOINT;
         }
+        // force slowpath if a read hook covers this page
+        if (uc_mem_read_hook_on_page(cpu->uc, paddr_page)) {
+            tn.addr_read |= TLB_SLOWPATH;
+        }
     } else {
         tn.addr_read = -1;
     }
@@ -965,6 +990,10 @@ void tlb_set_page_with_attrs(CPUState *cpu, target_ulong vaddr,
         }
         if (wp_flags & BP_MEM_WRITE) {
             tn.addr_write |= TLB_WATCHPOINT;
+        }
+        // force slowpath if a write hook covers this page
+        if (uc_mem_write_hook_on_page(cpu->uc, paddr_page)) {
+            tn.addr_write |= TLB_SLOWPATH;
         }
     }
 

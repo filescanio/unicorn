@@ -2247,6 +2247,9 @@ uc_err uc_hook_add(uc_engine *uc, uc_hook *hh, int type, void *callback,
     // TODO: return an error?
     if (hook->refs == 0) {
         free(hook);
+    } else if (type & UC_HOOK_MEM_SLOWPATH_MASK) {
+        // TLB entries of pages covered by the hook must force the slowpath
+        uc->tcg_flush_tlb(uc);
     }
 
     restore_jit_state(uc);
@@ -2277,6 +2280,10 @@ uc_err uc_hook_del(uc_engine *uc, uc_hook hh)
             hook->to_delete = true;
             uc->hooks_count[i]--;
             hook_append(&uc->hooks_to_del, hook);
+            if (hook->type & UC_HOOK_MEM_SLOWPATH_MASK) {
+                // pages are no longer forced to the slowpath by this hook
+                uc->tcg_flush_tlb(uc);
+            }
         }
     }
 
