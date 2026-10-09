@@ -6,6 +6,7 @@
 #include "qemu-common.h"
 #include "exec/memory.h"
 #include "exec/cpu_ldst.h"
+#include "exec/exec-all.h"
 
 // This header define common patterns/codes that will be included in all arch-sepcific
 // codes for unicorns purposes.
@@ -184,6 +185,21 @@ MemoryRegion *find_memory_mapping(struct uc_struct *uc, hwaddr address)
     return mr;
 }
 
+/*
+ * Only stores on the slow path set mr->dirty, and a page takes the slow path
+ * (TLB_NOTDIRTY) only until notdirty_write() finds no translated code on it,
+ * so later stores do not set the flag. Called when the dirty flag of the
+ * region is cleared: track the stores to its pages again so that the next one
+ * sets the flag.
+ */
+static void uc_track_region_writes(struct uc_struct *uc, MemoryRegion *mr)
+{
+    if (uc->cpu && mr->ram_block && mr->ram_block->host) {
+        tlb_reset_dirty(uc->cpu, (ram_addr_t)(uintptr_t)mr->ram_block->host,
+                        int128_get64(mr->size));
+    }
+}
+
 void softfloat_init(void);
 static inline void uc_common_init(struct uc_struct* uc)
 {
@@ -209,6 +225,7 @@ static inline void uc_common_init(struct uc_struct* uc)
     uc->memory_filter_subregions = memory_region_filter_subregions;
     uc->flatview_copy = flatview_copy;
     uc->memory_cow = memory_cow;
+    uc->track_region_writes = uc_track_region_writes;
 
     if (!uc->release)
         uc->release = release_common;

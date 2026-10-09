@@ -155,16 +155,13 @@ static void test_i386(void)
 #define CRC32_SC_PARAM 8
 
 /*
- * Memory layout: code and stack MUST be in separate mappings, and the stack
- * mapping MUST NOT be executable.
+ * Memory layout: code and stack are in separate mappings, and the stack
+ * mapping is not executable.
  *
- * Unicorn tracks writes to executable pages to detect self-modifying code: a
- * store to such a page always takes the slow path (helper call, memory region
- * lookup, translated block invalidation check) and the page is never marked
- * dirty, so every later store to it takes the slow path again. With the stack
- * in a UC_PROT_ALL mapping this applies to every push and every local
- * variable access, and this benchmark runs ~12x slower, measuring the
- * self-modifying code check instead of the emulation.
+ * Unicorn tracks writes to executable pages to detect self-modifying code.
+ * Writes to an executable page without translated code are not tracked, so a
+ * stack in a UC_PROT_ALL mapping is almost as fast, but keeping the stack
+ * non-executable makes the benchmark measure the emulation only.
  */
 #define CRC32_SC_CODE_SIZE 0x100000 // RWX: shellcode
 #define CRC32_SC_STACK (ADDRESS + CRC32_SC_CODE_SIZE)

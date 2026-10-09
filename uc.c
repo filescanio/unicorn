@@ -1377,6 +1377,7 @@ bool uc_mem_get_dirty(uc_engine *uc, uint64_t address, size_t size)
         if(mr->dirty) {
             dirty = true;
             mr->dirty = false;
+            uc->track_region_writes(uc, mr);
         }
         size_t remaining = MIN(size, mr->end - address);
         size -= remaining;
