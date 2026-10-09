@@ -1406,6 +1406,230 @@ static void test_mem_stop_timeout(void)
     OK(uc_close(uc));
 }
 
+static bool test_mem_prot_handled_cb(uc_engine *uc, uc_mem_type type,
+                                     uint64_t address, int size,
+                                     int64_t value, void *user_data)
+{
+    int *count = user_data;
+
+    (*count)++;
+    // make the page accessible, this flushes the TLB
+    OK(uc_mem_protect(uc, address & ~0xfffULL, 0x1000, UC_PROT_ALL));
+    return true;
+}
+
+// A fetch protection hook may add the X permission and continue, e.g. to
+// make only the pages executable that are actually executed.
+static void test_mem_fetch_prot_handled(void)
+{
+    uc_engine *uc;
+    uc_hook hk;
+    int faults = 0;
+    uint32_t eax;
+    // 1000: mov eax, 1 ; jmp 0x2000
+    char code1[] = "\xB8\x01\x00\x00\x00\xE9\xF6\x0F\x00\x00";
+    // 2000: mov eax, 2
+    char code2[] = "\xB8\x02\x00\x00\x00";
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x2000, UC_PROT_READ | UC_PROT_WRITE));
+    OK(uc_mem_write(uc, 0x1000, code1, sizeof(code1) - 1));
+    OK(uc_mem_write(uc, 0x2000, code2, sizeof(code2) - 1));
+    OK(uc_hook_add(uc, &hk, UC_HOOK_MEM_FETCH_PROT, test_mem_prot_handled_cb,
+                   &faults, 1, 0));
+
+    OK(uc_emu_start(uc, 0x1000, 0x2000 + sizeof(code2) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_EAX, &eax));
+    TEST_CHECK(eax == 2);
+    TEST_CHECK(faults == 2);
+
+    OK(uc_close(uc));
+}
+
+static bool test_mem_read_prot_accept_cb(uc_engine *uc, uc_mem_type type,
+                                         uint64_t address, int size,
+                                         int64_t value, void *user_data)
+{
+    int *count = user_data;
+
+    (*count)++;
+    return true;
+}
+
+// A read protection hook may make the page readable and continue, or just
+// accept the read.
+static void test_mem_read_prot_handled(void)
+{
+    uc_engine *uc;
+    uc_hook hk;
+    int faults = 0;
+    uint32_t eax, val = LEINT32(0x11223344);
+    // mov eax, dword ptr [0x3000]
+    char code[] = "\xA1\x00\x30\x00\x00";
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x3000, 0x1000, UC_PROT_WRITE));
+    OK(uc_mem_write(uc, 0x1000, code, sizeof(code) - 1));
+    OK(uc_mem_write(uc, 0x3000, &val, sizeof(val)));
+    OK(uc_hook_add(uc, &hk, UC_HOOK_MEM_READ_PROT, test_mem_prot_handled_cb,
+                   &faults, 1, 0));
+
+    OK(uc_emu_start(uc, 0x1000, 0x1000 + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_EAX, &eax));
+    TEST_CHECK(eax == 0x11223344);
+    TEST_CHECK(faults == 1);
+
+    OK(uc_close(uc));
+
+    // the hook accepts the read without changing the permissions
+    faults = 0;
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x3000, 0x1000, UC_PROT_WRITE));
+    OK(uc_mem_write(uc, 0x1000, code, sizeof(code) - 1));
+    OK(uc_mem_write(uc, 0x3000, &val, sizeof(val)));
+    OK(uc_hook_add(uc, &hk, UC_HOOK_MEM_READ_PROT,
+                   test_mem_read_prot_accept_cb, &faults, 1, 0));
+
+    OK(uc_emu_start(uc, 0x1000, 0x1000 + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_EAX, &eax));
+    TEST_CHECK(eax == 0x11223344);
+    TEST_CHECK(faults == 1);
+
+    OK(uc_close(uc));
+}
+
+static bool test_mem_write_prot_handled_cb(uc_engine *uc, uc_mem_type type,
+                                           uint64_t address, int size,
+                                           int64_t value, void *user_data)
+{
+    int *count = user_data;
+
+    (*count)++;
+    // make the page writable, this flushes the TLB and splits the region if
+    // it is larger than the page
+    OK(uc_mem_protect(uc, address & ~0xfffULL, 0x1000,
+                      UC_PROT_READ | UC_PROT_WRITE));
+    return true;
+}
+
+static void test_mem_write_prot_handled_run(size_t region_size,
+                                            bool make_writable)
+{
+    uc_engine *uc;
+    uc_hook hk;
+    int faults = 0;
+    uint32_t mem, initial = LEINT32(0xdeadbeef);
+    // mov dword ptr [0x3000], 0x44332211
+    char code[] = "\xC7\x05\x00\x30\x00\x00\x11\x22\x33\x44";
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x3000, region_size, UC_PROT_READ));
+    OK(uc_mem_write(uc, 0x1000, code, sizeof(code) - 1));
+    OK(uc_mem_write(uc, 0x3000, &initial, sizeof(initial)));
+    OK(uc_hook_add(uc, &hk, UC_HOOK_MEM_WRITE_PROT,
+                   make_writable ? (void *)test_mem_write_prot_handled_cb
+                                 : (void *)test_mem_read_prot_accept_cb,
+                   &faults, 1, 0));
+
+    OK(uc_emu_start(uc, 0x1000, 0x1000 + sizeof(code) - 1, 0, 0));
+    TEST_CHECK(faults == 1);
+    OK(uc_mem_read(uc, 0x3000, &mem, sizeof(mem)));
+    // without write permission the store is ignored, like a store to ROM
+    TEST_CHECK(LEINT32(mem) == (make_writable ? 0x44332211 : 0xdeadbeef));
+    TEST_MSG("region size 0x%zx, [0x3000] = 0x%x", region_size,
+             LEINT32(mem));
+
+    OK(uc_close(uc));
+}
+
+// A write protection hook may make the page writable and continue, the store
+// is then done.
+static void test_mem_write_prot_handled(void)
+{
+    test_mem_write_prot_handled_run(0x1000, true);
+    test_mem_write_prot_handled_run(0x3000, true);
+    test_mem_write_prot_handled_run(0x1000, false);
+}
+
+typedef struct {
+    int count;
+    bool unmap;
+} mem_hook_mapping_data;
+
+static void test_mem_hook_mapping_cb(uc_engine *uc, uc_mem_type type,
+                                     uint64_t address, int size,
+                                     int64_t value, void *user_data)
+{
+    mem_hook_mapping_data *data = user_data;
+
+    if (data->count++) {
+        return;
+    }
+    if (data->unmap) {
+        OK(uc_mem_unmap(uc, address & ~0xfffULL, 0x1000));
+    } else {
+        // splits the region, i.e. frees and recreates it
+        OK(uc_mem_protect(uc, address & ~0xfffULL, 0x1000,
+                          UC_PROT_READ | UC_PROT_WRITE));
+    }
+}
+
+static void test_mem_hook_mapping_run(bool write, bool unmap)
+{
+    uc_engine *uc;
+    uc_hook hk;
+    mem_hook_mapping_data data = {0, unmap};
+    uint32_t eax = 0, mem, val = LEINT32(0x11223344);
+    // mov eax, dword ptr [0x3000]
+    char code_rd[] = "\xA1\x00\x30\x00\x00";
+    // mov dword ptr [0x3000], 0x55667788
+    char code_wr[] = "\xC7\x05\x00\x30\x00\x00\x88\x77\x66\x55";
+    char *code = write ? code_wr : code_rd;
+    size_t len = write ? sizeof(code_wr) - 1 : sizeof(code_rd) - 1;
+    uc_err err;
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x3000, 0x3000, UC_PROT_ALL));
+    OK(uc_mem_write(uc, 0x1000, code, len));
+    OK(uc_mem_write(uc, 0x3000, &val, sizeof(val)));
+    OK(uc_hook_add(uc, &hk, write ? UC_HOOK_MEM_WRITE : UC_HOOK_MEM_READ,
+                   test_mem_hook_mapping_cb, &data, 1, 0));
+
+    err = uc_emu_start(uc, 0x1000, 0x1000 + len, 0, 0);
+    TEST_CHECK(data.count == 1);
+    if (unmap) {
+        TEST_CHECK(err == (write ? UC_ERR_WRITE_UNMAPPED
+                                 : UC_ERR_READ_UNMAPPED));
+        TEST_MSG("%s", uc_strerror(err));
+    } else {
+        TEST_CHECK(err == UC_ERR_OK);
+        TEST_MSG("%s", uc_strerror(err));
+        if (write) {
+            OK(uc_mem_read(uc, 0x3000, &mem, sizeof(mem)));
+            TEST_CHECK(LEINT32(mem) == 0x55667788);
+        } else {
+            OK(uc_reg_read(uc, UC_X86_REG_EAX, &eax));
+            TEST_CHECK(eax == 0x11223344);
+        }
+    }
+
+    OK(uc_close(uc));
+}
+
+// A memory hook may change or remove the mapping of the accessed page, the
+// access must use the new mapping.
+static void test_mem_hook_changes_mapping(void)
+{
+    test_mem_hook_mapping_run(false, false);
+    test_mem_hook_mapping_run(true, false);
+    test_mem_hook_mapping_run(false, true);
+    test_mem_hook_mapping_run(true, true);
+}
+
 TEST_LIST = {{"test_map_correct", test_map_correct},
              {"test_map_wrapping", test_map_wrapping},
              {"test_mem_protect", test_mem_protect},
@@ -1450,4 +1674,8 @@ TEST_LIST = {{"test_map_correct", test_map_correct},
              {"test_mem_stop_in_hook", test_mem_stop_in_hook},
              {"test_mem_stop_on_invalid_store", test_mem_stop_on_invalid_store},
              {"test_mem_stop_timeout", test_mem_stop_timeout},
+             {"test_mem_fetch_prot_handled", test_mem_fetch_prot_handled},
+             {"test_mem_read_prot_handled", test_mem_read_prot_handled},
+             {"test_mem_write_prot_handled", test_mem_write_prot_handled},
+             {"test_mem_hook_changes_mapping", test_mem_hook_changes_mapping},
              {NULL, NULL}};
