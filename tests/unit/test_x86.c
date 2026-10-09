@@ -1975,6 +1975,70 @@ static void test_x86_vtlb(void)
     OK(uc_close(uc));
 }
 
+// Data accesses use the DS and SS bases once segments with a non-zero base
+// are loaded in 32-bit mode.
+static void test_x86_32_segment_base(void)
+{
+    uc_engine *uc;
+    // 1000: mov eax, dword ptr [0x20]     ; ds:0x20
+    // 1005: mov dword ptr [0x24], eax     ; ds:0x24
+    // 100a: push 0x12345678               ; ss:esp-4
+    char code[] = "\xA1\x20\x00\x00\x00\xA3\x24\x00\x00\x00\x68\x78\x56\x34\x12";
+    // null, flat code segment, data segment with base 0x10000
+    uint32_t gdt[6] = {0, 0, LEINT32(0x0000ffff), LEINT32(0x00cf9a00),
+                       LEINT32(0x0000ffff), LEINT32(0x00cf9201)};
+    uc_x86_mmr gdtr = {0, 0x5000, sizeof(gdt) - 1, 0};
+    uint16_t sel = 0x10;
+    uint32_t esp = 0x100, val = LEINT32(0xdeadbeef), mem;
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x0, 0x20000, UC_PROT_ALL));
+    OK(uc_mem_write(uc, 0x1000, code, sizeof(code) - 1));
+    OK(uc_mem_write(uc, 0x5000, gdt, sizeof(gdt)));
+    OK(uc_mem_write(uc, 0x10020, &val, sizeof(val)));
+    OK(uc_reg_write(uc, UC_X86_REG_GDTR, &gdtr));
+    OK(uc_reg_write(uc, UC_X86_REG_DS, &sel));
+    OK(uc_reg_write(uc, UC_X86_REG_SS, &sel));
+    OK(uc_reg_write(uc, UC_X86_REG_ESP, &esp));
+
+    OK(uc_emu_start(uc, 0x1000, 0x1000 + sizeof(code) - 1, 0, 0));
+
+    OK(uc_mem_read(uc, 0x10024, &mem, sizeof(mem)));
+    TEST_CHECK(LEINT32(mem) == 0xdeadbeef);
+    OK(uc_mem_read(uc, 0x100fc, &mem, sizeof(mem)));
+    TEST_CHECK(LEINT32(mem) == 0x12345678);
+    // nothing was written to the unbased addresses
+    OK(uc_mem_read(uc, 0x24, &mem, sizeof(mem)));
+    TEST_CHECK(mem == 0);
+    OK(uc_mem_read(uc, 0xfc, &mem, sizeof(mem)));
+    TEST_CHECK(mem == 0);
+
+    OK(uc_close(uc));
+}
+
+// Same accesses with flat segments: no base is added.
+static void test_x86_32_segment_flat(void)
+{
+    uc_engine *uc;
+    char code[] = "\xA1\x20\x00\x00\x00\xA3\x24\x00\x00\x00\x68\x78\x56\x34\x12";
+    uint32_t esp = 0x100, val = LEINT32(0xdeadbeef), mem;
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x0, 0x20000, UC_PROT_ALL));
+    OK(uc_mem_write(uc, 0x1000, code, sizeof(code) - 1));
+    OK(uc_mem_write(uc, 0x20, &val, sizeof(val)));
+    OK(uc_reg_write(uc, UC_X86_REG_ESP, &esp));
+
+    OK(uc_emu_start(uc, 0x1000, 0x1000 + sizeof(code) - 1, 0, 0));
+
+    OK(uc_mem_read(uc, 0x24, &mem, sizeof(mem)));
+    TEST_CHECK(LEINT32(mem) == 0xdeadbeef);
+    OK(uc_mem_read(uc, 0xfc, &mem, sizeof(mem)));
+    TEST_CHECK(LEINT32(mem) == 0x12345678);
+
+    OK(uc_close(uc));
+}
+
 static void test_x86_segmentation(void)
 {
     uc_engine *uc;
@@ -2951,6 +3015,8 @@ TEST_LIST = {
     {"test_x86_read_virtual", test_x86_read_virtual},
     {"test_x86_vtlb", test_x86_vtlb},
     {"test_x86_segmentation", test_x86_segmentation},
+             {"test_x86_32_segment_base", test_x86_32_segment_base},
+             {"test_x86_32_segment_flat", test_x86_32_segment_flat},
     {"test_x86_0xff_lcall", test_x86_0xff_lcall},
     {"test_x86_64_not_overwriting_tmp0_for_pc_update",
      test_x86_64_not_overwriting_tmp0_for_pc_update},
