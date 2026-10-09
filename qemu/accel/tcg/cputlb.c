@@ -968,6 +968,10 @@ void tlb_set_page_with_attrs(CPUState *cpu, target_ulong vaddr,
         if (wp_flags & BP_MEM_READ) {
             tn.addr_read |= TLB_WATCHPOINT;
         }
+        // force slowpath if mr has no read permission
+        if (is_ram && !(section->mr->perms & UC_PROT_READ)) {
+            tn.addr_read |= TLB_SLOWPATH;
+        }
         // force slowpath if a read hook covers this page
         if (uc_mem_read_hook_on_page(cpu->uc, paddr_page)) {
             tn.addr_read |= TLB_SLOWPATH;
