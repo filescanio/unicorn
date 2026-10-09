@@ -1315,7 +1315,10 @@ void *probe_access(CPUArchState *env, target_ulong addr, int size,
         CPUIOTLBEntry *iotlbentry = &env_tlb(env)->d[mmu_idx].iotlb[index];
 
         /* Reject I/O access, or other required slow-path.  */
-        if (tlb_addr & (TLB_MMIO | TLB_BSWAP | TLB_DISCARD_WRITE)) {
+        /* Unicorn: TLB_SLOWPATH pages need the permission checks and memory
+           hooks of the load/store helpers. */
+        if (tlb_addr & (TLB_MMIO | TLB_BSWAP | TLB_DISCARD_WRITE |
+                        TLB_SLOWPATH)) {
             return NULL;
         }
 

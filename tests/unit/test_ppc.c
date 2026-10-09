@@ -153,10 +153,64 @@ static void test_ppc32_spr_mftb(void)
     TEST_CHECK(t1 != t2);
 }
 
+static void test_ppc32_mem_hook_cb(uc_engine *uc, uc_mem_type type,
+                                   uint64_t address, int size, int64_t value,
+                                   void *user_data)
+{
+    int *count = user_data;
+
+    (*count)++;
+}
+
+// lmw/stmw access memory via probe_access(); pages that need the slowpath
+// (memory hooks, no read permission) must not be accessed directly through
+// the host pointer it returns.
+static void test_ppc32_lmw_stmw_slowpath(void)
+{
+    uc_engine *uc;
+    uc_hook hk;
+    int writes = 0;
+    uint32_t reg, mem[2];
+    char stmw[] = "\xbf\xc3\x00\x00"; // stmw r30, 0(r3)
+    char lmw[] = "\xbb\xc4\x00\x00";  // lmw r30, 0(r4)
+
+    uc_common_setup(&uc, UC_ARCH_PPC, UC_MODE_32 | UC_MODE_BIG_ENDIAN, stmw,
+                    sizeof(stmw) - 1);
+    OK(uc_mem_map(uc, 0x10000, 0x1000, UC_PROT_READ | UC_PROT_WRITE));
+    OK(uc_mem_map(uc, 0x11000, 0x1000, UC_PROT_WRITE));
+
+    // write hook on the stored-to page must be called for each word
+    OK(uc_hook_add(uc, &hk, UC_HOOK_MEM_WRITE, test_ppc32_mem_hook_cb, &writes,
+                   0x10000, 0x10fff));
+    reg = 0x10000;
+    OK(uc_reg_write(uc, UC_PPC_REG_3, &reg));
+    reg = 0x11223344;
+    OK(uc_reg_write(uc, UC_PPC_REG_30, &reg));
+    reg = 0x55667788;
+    OK(uc_reg_write(uc, UC_PPC_REG_31, &reg));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(stmw) - 1, 0, 0));
+
+    TEST_CHECK(writes == 2);
+    OK(uc_mem_read(uc, 0x10000, mem, sizeof(mem)));
+    TEST_CHECK(mem[0] == BEINT32(0x11223344));
+    TEST_CHECK(mem[1] == BEINT32(0x55667788));
+
+    // loading from a non-readable page must fail
+    OK(uc_mem_write(uc, code_start, lmw, sizeof(lmw) - 1));
+    reg = 0x11000;
+    OK(uc_reg_write(uc, UC_PPC_REG_4, &reg));
+    uc_assert_err(UC_ERR_READ_PROT,
+                  uc_emu_start(uc, code_start, code_start + sizeof(lmw) - 1,
+                               0, 0));
+
+    OK(uc_close(uc));
+}
+
 TEST_LIST = {{"test_ppc32_add", test_ppc32_add},
              {"test_ppc32_fadd", test_ppc32_fadd},
              {"test_ppc32_sc", test_ppc32_sc},
              {"test_ppc32_cr", test_ppc32_cr},
              {"test_ppc32_spr_time", test_ppc32_spr_time},
              {"test_ppc32_spr_mftb", test_ppc32_spr_mftb},
+             {"test_ppc32_lmw_stmw_slowpath", test_ppc32_lmw_stmw_slowpath},
              {NULL, NULL}};
