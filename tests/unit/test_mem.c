@@ -1630,6 +1630,71 @@ static void test_mem_remove_exec_cached(void)
     test_mem_remove_exec_cached_run(false);
 }
 
+// A store to a page that still has translated code must not stop the
+// tracking of later stores to the page (#2029): the second store patches
+// another, already translated, function on the same page.
+static void test_smc_two_stores_same_page(void)
+{
+    uc_engine *uc;
+    uint32_t eax = 0, esp = 0x4800;
+    // 1000: call 0x1700              ; g: nop; ret   (translated)
+    // 1005: call 0x1800              ; f: mov eax, 1; ret   (translated)
+    // 100a: mov byte [0x1700], 0x90  ; store 1 invalidates g only
+    // 1011: mov dword [0x1801], 2    ; store 2 patches f: mov eax, 2
+    // 101b: call 0x1800
+    // 1020: nop
+    char code[] = "\xE8\xFB\x06\x00\x00\xE8\xF6\x07\x00\x00\xC6\x05\x00\x17"
+                  "\x00\x00\x90\xC7\x05\x01\x18\x00\x00\x02\x00\x00\x00\xE8"
+                  "\xE0\x07\x00\x00\x90";
+    char g[] = "\x90\xC3";
+    char f[] = "\xB8\x01\x00\x00\x00\xC3";
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x4000, 0x1000, UC_PROT_READ | UC_PROT_WRITE));
+    OK(uc_mem_write(uc, 0x1000, code, sizeof(code) - 1));
+    OK(uc_mem_write(uc, 0x1700, g, sizeof(g) - 1));
+    OK(uc_mem_write(uc, 0x1800, f, sizeof(f) - 1));
+    OK(uc_reg_write(uc, UC_X86_REG_ESP, &esp));
+
+    OK(uc_emu_start(uc, 0x1000, 0x1020, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_EAX, &eax));
+    TEST_CHECK(eax == 2);
+
+    OK(uc_close(uc));
+}
+
+// Stores to an executable page without code are not tracked, but once code
+// is translated from the page, stores to it must be tracked again.
+static void test_smc_code_on_untracked_page(void)
+{
+    uc_engine *uc;
+    uint32_t eax = 0, esp = 0x4800;
+    // 1000: mov dword [0x3000], 0xc340   ; writes "inc eax; ret" to 0x3000
+    // 100a: mov dword [0x3004], 0        ; more stores to the page
+    // 1014: call 0x3000                  ; eax = 1, code on page 0x3000
+    // 1019: mov byte [0x3000], 0x48      ; patches it to "dec eax; ret"
+    // 1020: call 0x3000                  ; eax = 0
+    // 1025: nop
+    char code[] = "\xC7\x05\x00\x30\x00\x00\x40\xC3\x00\x00\xC7\x05\x04\x30"
+                  "\x00\x00\x00\x00\x00\x00\xE8\xE7\x1F\x00\x00\xC6\x05\x00"
+                  "\x30\x00\x00\x48\xE8\xDB\x1F\x00\x00\x90";
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x3000, 0x1000, UC_PROT_ALL));
+    OK(uc_mem_map(uc, 0x4000, 0x1000, UC_PROT_READ | UC_PROT_WRITE));
+    OK(uc_mem_write(uc, 0x1000, code, sizeof(code) - 1));
+    OK(uc_reg_write(uc, UC_X86_REG_ESP, &esp));
+
+    OK(uc_emu_start(uc, 0x1000, 0x1025, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_EAX, &eax));
+    TEST_CHECK(eax == 0);
+    TEST_MSG("eax = %u", eax);
+
+    OK(uc_close(uc));
+}
+
 TEST_LIST = {{"test_map_correct", test_map_correct},
              {"test_map_wrapping", test_map_wrapping},
              {"test_mem_protect", test_mem_protect},
@@ -1671,6 +1736,9 @@ TEST_LIST = {{"test_map_correct", test_map_correct},
              {"test_mem_write_prot_handled", test_mem_write_prot_handled},
              {"test_mem_hook_changes_mapping", test_mem_hook_changes_mapping},
              {"test_mem_remove_exec_cached", test_mem_remove_exec_cached},
+             {"test_smc_two_stores_same_page", test_smc_two_stores_same_page},
+             {"test_smc_code_on_untracked_page",
+              test_smc_code_on_untracked_page},
              {"test_mem_hook_page_slowpath", test_mem_hook_page_slowpath},
              {"test_mem_hook_page_add_del", test_mem_hook_page_add_del},
              {"test_mem_hook_page_add_in_callback",

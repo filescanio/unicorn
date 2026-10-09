@@ -1866,12 +1866,6 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
         phys_page2 = get_page_addr_code(env, virt_page2);
     }
 
-    /* Undoes tlb_set_dirty in notdirty_write. */
-    if (!uc_mem_hook_installed(cpu->uc, tb->pc)) {
-        tlb_reset_dirty_by_vaddr(cpu, pc & TARGET_PAGE_MASK,
-                                (pc & ~TARGET_PAGE_MASK) + tb->size);
-    }
-
     /*
      * No explicit memory barrier is required -- tb_link_page() makes the
      * TB visible in a consistent state.
@@ -2044,7 +2038,11 @@ void tb_invalidate_phys_range(struct uc_struct *uc, ram_addr_t start, ram_addr_t
  *
  * Call with all @pages in the range [@start, @start + len[ locked.
  */
-void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *pages,
+/*
+ * Unicorn: returns true if no translated code is left on the page, i.e.
+ * writes to it no longer need to be tracked.
+ */
+bool tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *pages,
                                   tb_page_addr_t start, int len,
                                   uintptr_t retaddr)
 {
@@ -2054,7 +2052,7 @@ void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *
 
     p = page_find(uc, start >> TARGET_PAGE_BITS);
     if (!p) {
-        return;
+        return true;
     }
 
     assert_page_locked(p);
@@ -2076,6 +2074,7 @@ void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *
         tb_invalidate_phys_page_range__locked(uc, pages, p, start, start + len,
                                               retaddr);
     }
+    return p->first_tb == (uintptr_t)NULL;
 }
 
 /* user-mode: call with mmap_lock held */
