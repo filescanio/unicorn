@@ -717,6 +717,105 @@ static void test_smc2(void)
     OK(uc_close(uc));
 }
 
+static void test_mem_prot(void)
+{
+    uc_engine *uc;
+    uint64_t r_rsp;
+
+    char code_main[] = 
+        "\xC6\x05\xff\x20\x00\x00\x55"      // mov byte ptr [0x20ff],0x55
+        "\xA0\x00\x20\x00\x00"              // mov al,[0x2000]
+        ;
+    r_rsp = 0x5000;
+    printf("\n");
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_reg_write(uc, UC_X86_REG_ESP, &r_rsp));
+    OK(uc_mem_map  (uc, 0x0,    0x1000, UC_PROT_ALL));                // text
+    OK(uc_mem_map  (uc, 0x4000, 0x1000, UC_PROT_READ|UC_PROT_WRITE)); // stack
+    OK(uc_mem_map  (uc, 0x2000,0x1000, UC_PROT_WRITE|UC_PROT_EXEC)); // another text
+
+    OK(uc_mem_write(uc, 0x0,        code_main,   sizeof(code_main)-1));
+    uc_assert_err(UC_ERR_READ_PROT, uc_emu_start(uc, 0x0, sizeof(code_main)-1, 0, 0));
+
+    OK(uc_close(uc));
+}
+
+static bool test_mem_prot_write_cb(uc_engine *uc, uc_mem_type type,
+                                   uint64_t address, int size, int64_t value,
+                                   void *user_data)
+{
+    int *count = user_data;
+
+    TEST_CHECK(type == UC_MEM_WRITE_PROT);
+    TEST_CHECK(address == 0x2000);
+    (*count)++;
+    return false;
+}
+
+static void test_mem_prot_write_dummy_cb(uc_engine *uc, uc_mem_type type,
+                                         uint64_t address, int size,
+                                         int64_t value, void *user_data)
+{
+    /* this is only a dummy callback */
+}
+
+// Writes to RAM without UC_PROT_WRITE must be caught even when the page is
+// already in the TLB, i.e. the store would hit the TLB fast path. The read
+// fills the TLB entry (including addr_write) before the store. Also checked
+// after uc_mem_protect() changes the permission and with memory hooks
+// installed.
+static void test_mem_prot_write(void)
+{
+    uc_engine *uc;
+    uc_hook hk_prot, hk_dummy;
+    int prot_count = 0;
+    uint32_t mem;
+    // mov eax, dword ptr [0x2000]
+    // mov dword ptr [0x2000], 0x11223344
+    char code[] = "\xA1\x00\x20\x00\x00"
+                  "\xC7\x05\x00\x20\x00\x00\x44\x33\x22\x11";
+    uint32_t initial = LEINT32(0xdeadbeef);
+
+    OK(uc_open(UC_ARCH_X86, UC_MODE_32, &uc));
+    OK(uc_mem_map(uc, 0x1000, 0x1000, UC_PROT_READ | UC_PROT_EXEC));
+    OK(uc_mem_map(uc, 0x2000, 0x1000, UC_PROT_READ));
+    OK(uc_mem_write(uc, 0x1000, code, sizeof(code) - 1));
+    OK(uc_mem_write(uc, 0x2000, &initial, sizeof(initial)));
+
+    // mapped read-only
+    uc_assert_err(UC_ERR_WRITE_PROT,
+                  uc_emu_start(uc, 0x1000, 0x1000 + sizeof(code) - 1, 0, 0));
+    OK(uc_mem_read(uc, 0x2000, &mem, sizeof(mem)));
+    TEST_CHECK(LEINT32(mem) == 0xdeadbeef);
+
+    // made writable
+    OK(uc_mem_protect(uc, 0x2000, 0x1000, UC_PROT_READ | UC_PROT_WRITE));
+    OK(uc_emu_start(uc, 0x1000, 0x1000 + sizeof(code) - 1, 0, 0));
+    OK(uc_mem_read(uc, 0x2000, &mem, sizeof(mem)));
+    TEST_CHECK(LEINT32(mem) == 0x11223344);
+
+    // made read-only again
+    OK(uc_mem_write(uc, 0x2000, &initial, sizeof(initial)));
+    OK(uc_mem_protect(uc, 0x2000, 0x1000, UC_PROT_READ));
+    uc_assert_err(UC_ERR_WRITE_PROT,
+                  uc_emu_start(uc, 0x1000, 0x1000 + sizeof(code) - 1, 0, 0));
+    OK(uc_mem_read(uc, 0x2000, &mem, sizeof(mem)));
+    TEST_CHECK(LEINT32(mem) == 0xdeadbeef);
+
+    // with a write-protection hook and an unrelated memory hook installed
+    OK(uc_hook_add(uc, &hk_prot, UC_HOOK_MEM_WRITE_PROT, test_mem_prot_write_cb,
+                   &prot_count, 1, 0));
+    OK(uc_hook_add(uc, &hk_dummy, UC_HOOK_MEM_READ | UC_HOOK_MEM_WRITE,
+                   test_mem_prot_write_dummy_cb, NULL, 0x10, 0x10));
+    uc_assert_err(UC_ERR_WRITE_PROT,
+                  uc_emu_start(uc, 0x1000, 0x1000 + sizeof(code) - 1, 0, 0));
+    TEST_CHECK(prot_count == 1);
+    OK(uc_mem_read(uc, 0x2000, &mem, sizeof(mem)));
+    TEST_CHECK(LEINT32(mem) == 0xdeadbeef);
+
+    OK(uc_close(uc));
+}
+
 /*
  * Ensures that a code section initially as RW, if marked later as RX
  * still works as expected
@@ -911,6 +1010,8 @@ TEST_LIST = {{"test_map_correct", test_map_correct},
              {"test_smc", test_smc},
              {"test_tlbdirty_exec", test_tlbdirty_exec},
              {"test_smc2", test_smc2},
+             {"test_mem_prot", test_mem_prot},
+             {"test_mem_prot_write", test_mem_prot_write},
              {"test_mem_hook_page_slowpath", test_mem_hook_page_slowpath},
              {"test_mem_hook_page_add_del", test_mem_hook_page_add_del},
              {"test_mem_hook_page_add_in_callback",
