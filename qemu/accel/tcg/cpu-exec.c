@@ -102,6 +102,9 @@ static inline tcg_target_ulong cpu_tb_exec(CPUState *cpu, TranslationBlock *itb)
         }
 
         cpu->tcg_exit_req = 0;
+        // the PC was set by the user (uc_reg_write()), it is not synced above
+        // because of quit_request
+        cpu->uc->skip_sync_pc_on_exit = false;
     }
     return ret;
 }

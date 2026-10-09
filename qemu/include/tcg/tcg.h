@@ -690,6 +690,7 @@ struct TCGContext {
     TBContext tb_ctx;
     /* qemu/include/exec/gen-icount.h */
     TCGOp *icount_start_insn;
+    TCGLabel *exitreq_label;
     /* qemu/tcg/tcg.c */
     GHashTable *helper_table;
     GHashTable *custom_helper_infos; // To support inline hooks.
