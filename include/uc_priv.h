@@ -469,6 +469,16 @@ struct uc_struct {
     bool skip_sync_pc_on_exit;
 };
 
+// The load/store helpers leave the TB themselves when an exit was requested
+// during a memory access (uc_emu_stop() in a hook, invalid access, ...), so no
+// exit check is emitted after each access. Not on ARM, where an IT block must
+// not be left in the middle (see no_exit_request), and MIPS, where a delay
+// slot must not be left: these keep the exit check emitted after each access.
+static inline bool uc_mem_helpers_check_exit(struct uc_struct *uc)
+{
+    return uc->arch != UC_ARCH_ARM && uc->arch != UC_ARCH_MIPS;
+}
+
 // Metadata stub for the variable-size cpu context used with uc_context_*()
 struct uc_context {
     size_t context_size;  // size of the real internal context structure
