@@ -614,8 +614,15 @@ void tlb_flush_page_all_cpus_synced(CPUState *src, target_ulong addr)
    can be detected */
 void tlb_protect_code(struct uc_struct *uc, ram_addr_t ram_addr)
 {
-    cpu_physical_memory_test_and_clear_dirty(ram_addr, TARGET_PAGE_SIZE,
-                                             DIRTY_MEMORY_CODE);
+    /*
+     * Unicorn: there is no dirty memory bitmap. Called when the first TB of
+     * the page is created: notdirty_write() may have stopped tracking the
+     * writes to the page (tlb_set_dirty()) while it had no code, so track
+     * them again in all TLB entries mapping it.
+     */
+    uintptr_t host = (uintptr_t)qemu_map_ram_ptr(uc, NULL, ram_addr);
+
+    tlb_reset_dirty(uc->cpu, host, TARGET_PAGE_SIZE);
 }
 
 /* update the TLB so that writes in physical page 'phys_addr' are no longer
@@ -1233,22 +1240,26 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
 #endif
     ram_addr_t ram_addr = mem_vaddr + iotlbentry->addr;
     MemoryRegion *mr = cpu->uc->memory_mapping(cpu->uc, tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK));
+    bool no_code = true;
 
     if (mr && (mr->perms & UC_PROT_EXEC) != 0) {
         struct page_collection *pages
             = page_collection_lock(cpu->uc, ram_addr, ram_addr + size);
-        tb_invalidate_phys_page_fast(cpu->uc, pages, ram_addr, size, retaddr);
+        no_code = tb_invalidate_phys_page_fast(cpu->uc, pages, ram_addr, size,
+                                               retaddr);
         page_collection_unlock(pages);
     }
 
-    /* For exec pages, this is cleared in tb_gen_code. */
-    // If we:
-    // - have memory hooks installed
-    // - or doing snapshot
-    // , then never clean the tlb
-    if (!(!mr || (tlbe->addr_write != -1 && mr->priority < cpu->uc->snapshot_level)) &&
-            !(tlbe->addr_code != -1) &&
-            !uc_mem_hook_installed(cpu->uc, tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK))) {
+    /*
+     * Stop tracking the writes to this page (TLB_NOTDIRTY) only if no
+     * translated code is left on it: the write invalidated only the code it
+     * overlaps, later writes may hit other code on the page. Tracking is
+     * enabled again by tlb_protect_code() when code is translated on the page.
+     * Memory hooks do not depend on this, they use TLB_SLOWPATH. Not while a
+     * snapshot copy-on-write is pending for the region.
+     */
+    if (mr && no_code &&
+        !(tlbe->addr_write != -1 && mr->priority < cpu->uc->snapshot_level)) {
         tlb_set_dirty(cpu, mem_vaddr);
     }
 }
