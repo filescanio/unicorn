@@ -2106,6 +2106,42 @@ static void test_x86_pcmpestri_rexw_length(void)
     OK(uc_close(uc));
 }
 
+// UC_HOOK_BLOCK reports the size of the block in bytes (UC_HOOK_BLOCK_ICOUNT
+// reports the number of instructions)
+static void test_x86_hook_block_size_cb(uc_engine *uc, uint64_t address,
+                                        uint32_t size, void *user_data)
+{
+    uint32_t *sizes = user_data;
+
+    if (address == code_start) {
+        sizes[0] = size;
+    } else if (address == code_start + 9) {
+        sizes[1] = size;
+    }
+}
+
+static void test_x86_hook_block_size(void)
+{
+    uc_engine *uc;
+    uc_hook hk;
+    uint32_t sizes[2] = {0, 0};
+    // nop; nop; mov eax, 1; jmp +0 (9 bytes, 4 insns)
+    // nop; jmp +0 (3 bytes, 2 insns)
+    char code[] = "\x90\x90\xB8\x01\x00\x00\x00\xEB\x00\x90\xEB\x00";
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_32, code, sizeof(code) - 1);
+    OK(uc_hook_add(uc, &hk, UC_HOOK_BLOCK, test_x86_hook_block_size_cb, sizes,
+                   1, 0));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+
+    TEST_CHECK(sizes[0] == 9);
+    TEST_MSG("size = %u", sizes[0]);
+    TEST_CHECK(sizes[1] == 3);
+    TEST_MSG("size = %u", sizes[1]);
+
+    OK(uc_close(uc));
+}
+
 static void test_x86_segmentation(void)
 {
     uc_engine *uc;
@@ -3087,6 +3123,7 @@ TEST_LIST = {
              {"test_x86_pcmpistri_equal_ordered_partial",
               test_x86_pcmpistri_equal_ordered_partial},
              {"test_x86_pcmpestri_rexw_length", test_x86_pcmpestri_rexw_length},
+             {"test_x86_hook_block_size", test_x86_hook_block_size},
     {"test_x86_0xff_lcall", test_x86_0xff_lcall},
     {"test_x86_64_not_overwriting_tmp0_for_pc_update",
      test_x86_64_not_overwriting_tmp0_for_pc_update},
