@@ -1976,25 +1976,24 @@ SSE_HELPER_Q(helper_pcmpgtq, FCMPGTQ)
 
 static inline int pcmp_elen(CPUX86State *env, int reg, uint32_t ctrl)
 {
-    int val;
+    target_long val, limit = (ctrl & 1) ? 8 : 16;
 
     /* Presence of REX.W is indicated by a bit higher than 7 set */
     if (ctrl >> 8) {
-        val = abs1((int64_t)env->regs[reg]);
+        val = (target_long)env->regs[reg];
     } else {
-        val = abs1((int32_t)env->regs[reg]);
+        val = (int32_t)env->regs[reg];
     }
 
-    if (ctrl & 1) {
-        if (val > 8) {
-            return 8;
-        }
-    } else {
-        if (val > 16) {
-            return 16;
-        }
+    /*
+     * The length is the absolute value, saturated to the number of elements.
+     * Saturate before taking the absolute value: it must not be truncated to
+     * int (the 64-bit length of REX.W) and -INT_MIN overflows.
+     */
+    if (val > limit || val < -limit) {
+        return limit;
     }
-    return val;
+    return val < 0 ? -val : val;
 }
 
 static inline int pcmp_ilen(Reg *r, uint8_t ctrl)
@@ -2076,10 +2075,18 @@ static inline unsigned pcmpxstrx(CPUX86State *env, Reg *d, Reg *s,
             res = (2 << upper) - 1;
             break;
         }
-        for (j = valids - validd; j >= 0; j--) {
+        /*
+         * Equal ordered: bit j is set if the needle d occurs in s at j. Needle
+         * elements beyond the end of the block are not compared, so if all
+         * elements of s are valid there are partial matches at the end of the
+         * block, which software uses to find a needle across two blocks. An
+         * invalid element of s does not match a valid one of d, so otherwise
+         * the whole needle must fit.
+         */
+        for (j = valids == upper ? valids : valids - validd; j >= 0; j--) {
             res <<= 1;
             v = 1;
-            for (i = validd; i >= 0; i--) {
+            for (i = MIN(valids - j, validd); i >= 0; i--) {
                 v &= (pcmp_val(s, ctrl, i + j) == pcmp_val(d, ctrl, i));
             }
             res |= v;

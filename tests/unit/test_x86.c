@@ -2039,6 +2039,73 @@ static void test_x86_32_segment_flat(void)
     OK(uc_close(uc));
 }
 
+#define X86_FLAGS_ARITH 0x8d5 // OF SF ZF AF PF CF
+
+// pcmpistri equal ordered (substring search): if the haystack fills the whole
+// 16 byte block, a needle running past its end is a partial match, reported
+// so that software can find a needle across two blocks (e.g. strstr).
+static void test_x86_pcmpistri_equal_ordered_partial(void)
+{
+    uc_engine *uc;
+    // pcmpistri xmm1, xmm2, 0x0c (unsigned bytes, equal ordered, LSB index)
+    char code[] = "\x66\x0F\x3A\x63\xCA\x0C";
+    uint8_t needle[16] = {'a', 'b', 'c'};
+    uint8_t hay[16];
+    uint64_t rcx = 0, eflags = 0;
+
+    memset(hay, 'x', sizeof(hay));
+    hay[14] = 'a';
+    hay[15] = 'b';
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_reg_write(uc, UC_X86_REG_XMM1, needle));
+    OK(uc_reg_write(uc, UC_X86_REG_XMM2, hay));
+    OK(uc_reg_write(uc, UC_X86_REG_RCX, &rcx));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_RCX, &rcx));
+    OK(uc_reg_read(uc, UC_X86_REG_EFLAGS, &eflags));
+
+    // as on real hardware: partial match at 14, CF and SF (short needle)
+    TEST_CHECK(rcx == 14);
+    TEST_MSG("ecx = %u", (unsigned)rcx);
+    TEST_CHECK((eflags & X86_FLAGS_ARITH) == 0x81);
+    TEST_MSG("eflags = 0x%x", (unsigned)(eflags & X86_FLAGS_ARITH));
+
+    OK(uc_close(uc));
+}
+
+// pcmpestri with REX.W takes the explicit lengths from the 64-bit RAX and RDX,
+// saturated to the number of elements, not truncated to 32 bits.
+static void test_x86_pcmpestri_rexw_length(void)
+{
+    uc_engine *uc;
+    // pcmpestri xmm1, xmm2, 0x08 with REX.W (unsigned bytes, equal each)
+    char code[] = "\x66\x48\x0F\x3A\x61\xCA\x08";
+    uint8_t a[16], b[16];
+    uint64_t rax = 3, rdx = 0x100000002ULL, rcx = 0, eflags = 0;
+
+    memset(a, 'a', sizeof(a));
+    memset(b, 'a', sizeof(b));
+    b[5] = 'z';
+
+    uc_common_setup(&uc, UC_ARCH_X86, UC_MODE_64, code, sizeof(code) - 1);
+    OK(uc_reg_write(uc, UC_X86_REG_XMM1, a));
+    OK(uc_reg_write(uc, UC_X86_REG_XMM2, b));
+    OK(uc_reg_write(uc, UC_X86_REG_RAX, &rax));
+    OK(uc_reg_write(uc, UC_X86_REG_RDX, &rdx));
+    OK(uc_reg_write(uc, UC_X86_REG_RCX, &rcx));
+    OK(uc_emu_start(uc, code_start, code_start + sizeof(code) - 1, 0, 0));
+    OK(uc_reg_read(uc, UC_X86_REG_RCX, &rcx));
+    OK(uc_reg_read(uc, UC_X86_REG_EFLAGS, &eflags));
+
+    // as on real hardware: RDX saturates to 16, so ZF is clear
+    TEST_CHECK(rcx == 0);
+    TEST_CHECK((eflags & X86_FLAGS_ARITH) == 0x881);
+    TEST_MSG("eflags = 0x%x", (unsigned)(eflags & X86_FLAGS_ARITH));
+
+    OK(uc_close(uc));
+}
+
 static void test_x86_segmentation(void)
 {
     uc_engine *uc;
@@ -3017,6 +3084,9 @@ TEST_LIST = {
     {"test_x86_segmentation", test_x86_segmentation},
              {"test_x86_32_segment_base", test_x86_32_segment_base},
              {"test_x86_32_segment_flat", test_x86_32_segment_flat},
+             {"test_x86_pcmpistri_equal_ordered_partial",
+              test_x86_pcmpistri_equal_ordered_partial},
+             {"test_x86_pcmpestri_rexw_length", test_x86_pcmpestri_rexw_length},
     {"test_x86_0xff_lcall", test_x86_0xff_lcall},
     {"test_x86_64_not_overwriting_tmp0_for_pc_update",
      test_x86_64_not_overwriting_tmp0_for_pc_update},
