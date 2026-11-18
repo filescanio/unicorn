@@ -763,8 +763,8 @@ static void gen_helper_out_func(TCGContext *tcg_ctx, MemOp ot, TCGv_i32 v, TCGv_
 static void gen_check_io(DisasContext *s, MemOp ot, target_ulong cur_eip,
                          uint32_t svm_flags)
 {
-    // Unicorn: allow all I/O instructions
-    return;
+    // Unicorn: I/O instructions are checked as the CPU checks them: user mode with IOPL below its CPL gets a #GP
+    // (no task state segment, so no I/O permission bitmap), kernel mode runs them
 
     TCGContext *tcg_ctx = s->uc->tcg_ctx;
     target_ulong next_eip;
