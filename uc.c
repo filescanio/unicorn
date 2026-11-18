@@ -1339,33 +1339,21 @@ static bool memory_overlap(struct uc_struct *uc, uint64_t begin, size_t size)
 UNICORN_EXPORT
 uint64_t uc_mem_find_gap(uc_engine *uc, uint64_t address, size_t size)
 {
-    MemoryRegion * mr;
-    int i = bsearch_mapped_blocks(uc, address);
-    uint64_t prev_end = (uint64_t)-1;
+    /* the lowest address at or above address where size bytes are unmapped: past every region that is in the
+       way, also when they are adjacent (an image's sections) and when address is inside one */
+    uint64_t candidate = address;
+    int i;
 
-    // is this the highest region already?
-    if(i >= uc->mapped_block_count)
-        return address;
+    for (i = bsearch_mapped_blocks(uc, address); i < uc->mapped_block_count; i++) {
+        MemoryRegion *mr = uc->mapped_blocks[i];
 
-    mr = uc->mapped_blocks[i];
-
-    // end address overlaps this region?
-    if(address + size <= mr->addr)
-        return address; /* no overlap, good gap */
-
-    /* find gap with lowest address */
-    i++;
-    for(; i < uc->mapped_block_count; i++) {
-        prev_end = mr->end;
-
-        mr = uc->mapped_blocks[i];
-        if(mr->addr - prev_end >= size) {
-            break;
-        }
-
+        if (candidate + size <= mr->addr)
+            break; /* fits before this region */
+        if (mr->end > candidate)
+            candidate = mr->end;
     }
 
-    return prev_end;
+    return candidate;
 }
 
 UNICORN_EXPORT
