@@ -425,6 +425,10 @@ static inline bool cpu_handle_exception(CPUState *cpu, int *ret)
             *ret = EXCP_HLT;
             return true;
         }
+#if defined(TARGET_X86_64)
+        // Unicorn: the hook took the exception as its delivery would have: the next fault is not a double fault
+        env->old_exception = -1;
+#endif
 
         cpu->exception_index = -1;
     }
